@@ -25,19 +25,11 @@ if not getattr(_requests.sessions.Session.request, "_wrapped_with_timeout", Fals
 from api_lib import Robot, create_task
 
 # ===== App / Robot config =====
-#DEFAULT_ROBOT_ID = "8982412804553br"
 DEFAULT_ROBOT_ID = "FS52505505633sR"
-
-# WAITING_POI_NAME = "Standby"
 WAITING_POI_NAME = "Wartepunkt"
 
 # Motion / actions
-# RUN_TYPE_LIFT = 22
-# TASK_TYPE_LIFT = 2
-# SOURCE_SDK     = 6
-# ROUTE_SEQ      = 1
-# RUNMODE_FLEX   = 1
-# ACTION         = {"lift_up": 47, "lift_down": 48}
+
 # Motion / actions
 RUN_TYPE_LIFT = 29
 TASK_TYPE_LIFT = 5
@@ -55,8 +47,8 @@ def act_pause(seconds: int = PAUSE_SECONDS) -> Dict[str, Any]:
 # Timing / gating
 POLL_SEC           = 0.5
 ARRIVE_DIST_M      = 0.25
-ROW_GATE_DWELL_SEC = 5.0
-PRE_PULSE_DWELL_S  = 5.0
+ROW_GATE_DWELL_SEC = 7.0
+PRE_PULSE_DWELL_S  = 7.0
 POST_PULSE_DWELL_S = 180.0
 # POST_PULSE_DWELL_S = 180.0
 
@@ -346,6 +338,7 @@ class RowSpec:
         self.wrapper = wrapper
         self.use_wrapper = use_wrapper
 
+
 class FSMRunner(threading.Thread):
     def __init__(self, robot_id: str, waiting_poi: Dict[str,Any], rows: List[RowSpec], on_exit=None):
         super().__init__(daemon=True)
@@ -413,10 +406,16 @@ class FSMRunner(threading.Thread):
                             self.state = FSMState.PREPARE_PULSE
                         else:
                             name = f"r{self.row_idx+1}_{int(time.time())}"
-                            self._create(rob, name, [
+                            ptts = [
                                 pt(row.pickup, acts=[act_lift_up()]),
                                 pt(row.drop,   acts=[act_lift_down()]),
-                            ])
+                            ]
+                            self._create(rob, name, ptts)
+
+                            # from api_lib_v1 import Robot_v2, Task
+                            # temprob = Robot_v2(rob.SN)
+                            # task = Task(temprob, "area", taskType="factory",runType="lift").pickup(ptts[0]['ext']['name'], lift_up=True, areaDelivery=False).pickup(ptts[1]['ext']['name'], lift_down=True, areaDelivery=True)
+                            # resp = create_task(**task.task_dict)
                             _log(f"[FSM] Row {self.row_idx+1}: confirmation dwell {ROW_GATE_DWELL_SEC:.0f}s at waiting")
                             if not depart_then_dwell(rob, self.waiting, ARRIVE_DIST_M, ROW_GATE_DWELL_SEC):
                                 _log("[FSM] confirmation dwell failed → ABORTED"); self.state = FSMState.ABORTED; continue
@@ -445,10 +444,15 @@ class FSMRunner(threading.Thread):
                 elif self.state == FSMState.SUBMIT_B:
                     try:
                         name = f"r{self.row_idx+1}_B_{int(time.time())}"
-                        self._create(rob, name, [
+                        ptts = [
                             pt(row.wrapper, acts=[act_lift_up()]),
                             pt(row.drop,    acts=[act_lift_down()]),
-                        ])
+                        ]
+                        self._create(rob, name, ptts)
+                        # from api_lib_v1 import Robot_v2, Task
+                            # temprob = Robot_v2(rob.SN)
+                            # task = Task(temprob, "area", taskType="factory",runType="lift").pickup(ptts[0]['ext']['name'], lift_up=True, areaDelivery=True).pickup(ptts[1]['ext']['name'], lift_down=True, areaDelivery=True)
+                            # resp = create_task(**task.task_dict)
                         _log(f"[FSM] Row {self.row_idx+1}: confirmation dwell {ROW_GATE_DWELL_SEC:.0f}s at waiting")
                         if not depart_then_dwell(rob, self.waiting, ARRIVE_DIST_M, ROW_GATE_DWELL_SEC):
                             _log("[FSM] B completion dwell failed → ABORTED"); self.state = FSMState.ABORTED; continue
@@ -556,9 +560,8 @@ app.layout = dbc.Container([
 
     html.Div([row_ui(i) for i in range(4)]),
 
-    dbc.Button("Start Plan", id="btn-start", color="primary", className="my-3 me-2"),
-    dbc.Button("Go Standby", id="btn-back", color="danger", className="my-3"),
-    # dbc.Button("Cancel", id="btn-cancel", color="danger", className="my-3"),
+    dbc.Button("Start", id="btn-start", color="primary", className="my-3 me-2"),
+    dbc.Button("Zurück", id="btn-back", color="danger", className="my-3"),
     dbc.Alert(id="result", color="info", is_open=False, duration=8000, className="mt-2"),
 
     dcc.Interval(id="tick", interval=1000, n_intervals=0),
@@ -613,7 +616,6 @@ from dash import ctx
     Output("result", "children"),
     Output("result", "is_open"),
     Input("btn-start", "n_clicks"),
-    # Input("btn-cancel", "n_clicks"),
     Input("btn-back", "n_clicks"),
     State("robot-state", "data"),
     *[State({"type":"include-ck","index":i}, "value") for i in range(4)],
@@ -622,7 +624,7 @@ from dash import ctx
     *[State({"type":"wrapper-ck","index":i}, "value") for i in range(4)],
     prevent_initial_call=True
 )
-def handle_actions(n_start, n_cancel, n_back, rstate, *state):
+def handle_actions(n_start, n_back, rstate, *state):
     global RUNNER
     trigger = getattr(ctx, "triggered_id", None)
     if trigger is None:
