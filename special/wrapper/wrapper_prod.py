@@ -594,9 +594,9 @@ def on_load_robot(n, robot_id):
    _log(f"[UI] Load robot → '{rid}' (clicks={n})")
    try:
        set_robot(rid)  # single instance swap here
-        picks = _all_poi_names()
+       picks = _all_poi_names()
        picks = _pickups(rid)
-        drops = picks
+       drops = picks
        drops = _drops(rid)
        wait  = _find_waiting()
    except Exception as e:
