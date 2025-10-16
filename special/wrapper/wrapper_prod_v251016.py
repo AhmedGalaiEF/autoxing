@@ -25,7 +25,8 @@ if not getattr(_requests.sessions.Session.request, "_wrapped_with_timeout", Fals
 from api_lib_v1 import *   # <-- uses Robot_v2 for "Return"
 
 # ===== App / Robot config =====
-DEFAULT_ROBOT_ID = "FS52505505633sR"   # <-- hardcoded
+DEFAULT_ROBOT_ID = "B682312702539EX"
+# DEFAULT_ROBOT_ID = "FS52505505633sR"   # <-- hardcoded
 WAITING_POI_NAME = "Wartepunkt"
 
 # Motion / actions (unchanged opcodes, keep your backend mapping)
