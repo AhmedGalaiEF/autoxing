@@ -546,7 +546,7 @@ app.layout = dbc.Container([
            dbc.Col(html.Div("Robot ID:"), width="auto"),
            dbc.Col(dbc.Input(id="robot-id", value=DEFAULT_ROBOT_ID, placeholder="robotId", n_submit=0, type="text", disabled=True),
                    width=4),
-           dbc.Col(dbc.Button("Load robot", id="btn-load", color="secondary"), width="auto", disabled=True),
+           dbc.Col(dbc.Button("Load robot", id="btn-load", color="secondary", disabled=True), width="auto"),
            dbc.Col(html.Div(id="robot-hint", className="ms-3"), width=True),
         ], align="center"),
         html.Div(id="waiting-fixed", style={"textAlign":"right", "marginTop":"6px"}),
