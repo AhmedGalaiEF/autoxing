@@ -26,7 +26,7 @@ from api_lib import Robot, create_task
 
 # ===== App / Robot config =====
 #DEFAULT_ROBOT_ID = "8982412804553br"
- DEFAULT_ROBOT_ID = "FS52505505633sR"
+DEFAULT_ROBOT_ID = "FS52505505633sR"
 
 # WAITING_POI_NAME = "Standby"
 WAITING_POI_NAME = "Wartepunkt"
