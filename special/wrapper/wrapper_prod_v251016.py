@@ -109,6 +109,7 @@ def _poi_df() -> pd.DataFrame:
     try:
         r = get_robot()
         df = r.get_pois()
+        print(df)
         return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
     except Exception:
         return pd.DataFrame()
