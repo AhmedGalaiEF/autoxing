@@ -79,9 +79,10 @@ def _pulse_gpio():
     GPIO.output(RELAY_PIN, GPIO.LOW if ACTIVE_HIGH else GPIO.HIGH)
 
 # ===== POI helpers =====
-# Regex: include "Sichtlager"
+
+# ===== POI helpers =====
 RX_PICKUP = re.compile(r"^Abhol\s*\d+$", re.IGNORECASE)
-RX_SICHT  = re.compile(r"^(Sicht|Sichtlager)\s*\d+$", re.IGNORECASE)   # <-- adjusted
+RX_SICHT  = re.compile(r"^Sicht\s*\d+$", re.IGNORECASE)
 RX_EURO   = re.compile(r"^Euro\s*\d+$",  re.IGNORECASE)
 RX_DIV    = re.compile(r"^Div\s*\d+$",   re.IGNORECASE)
 
@@ -109,7 +110,7 @@ def _poi_df() -> pd.DataFrame:
     try:
         r = get_robot()
         df = r.get_pois()
-        print(df)
+        # print(df)
         return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
     except Exception:
         return pd.DataFrame()
