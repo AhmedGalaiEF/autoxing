@@ -558,7 +558,7 @@ app.layout = dbc.Container([
 
     dbc.Button("Start Plan", id="btn-start", color="primary", className="my-3 me-2"),
     dbc.Button("Go Standby", id="btn-back", color="danger", className="my-3"),
-    dbc.Button("Cancel", id="btn-cancel", color="danger", className="my-3")
+    # dbc.Button("Cancel", id="btn-cancel", color="danger", className="my-3"),
     dbc.Alert(id="result", color="info", is_open=False, duration=8000, className="mt-2"),
 
     dcc.Interval(id="tick", interval=1000, n_intervals=0),
@@ -613,7 +613,7 @@ from dash import ctx
     Output("result", "children"),
     Output("result", "is_open"),
     Input("btn-start", "n_clicks"),
-    Input("btn-cancel", "n_clicks"),
+    # Input("btn-cancel", "n_clicks"),
     Input("btn-back", "n_clicks"),
     State("robot-state", "data"),
     *[State({"type":"include-ck","index":i}, "value") for i in range(4)],

@@ -88,7 +88,7 @@ def _pulse_gpio():
 
 # ===== POI helpers =====
 RX_PICKUP = re.compile(r"^Abhol\s*\d+$", re.IGNORECASE)
-RX_SICHT  = re.compile(r"^Sichtlager\s*\d+$", re.IGNORECASE)
+RX_SICHT  = re.compile(r"^Sicht\s*\d+$", re.IGNORECASE)
 RX_EURO   = re.compile(r"^Euro\s*\d+$",  re.IGNORECASE)
 RX_DIV    = re.compile(r"^Div\s*\d+$",   re.IGNORECASE)
 
