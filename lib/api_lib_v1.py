@@ -778,7 +778,7 @@ class Task:
     # --- shelf pickup / lift at shelf point (type 34 required) ---
 
     def pickup(self, shelf_name: str, *, lift_up: bool | None = None, lift_down: bool | None = None,
-               stopRadius: float | None = None, extra_ext: dict | None = None, areaDelivery=False):
+               stopRadius: float | None = None, extra_ext: dict | None = None):
         det = self._require_poi_type(shelf_name, {Task.TYPE_SHELF}, "pickup")
         x, y, yaw = self._poi_pose(shelf_name)
         ext = {"name": shelf_name, "id": det.get("id")}
@@ -790,14 +790,9 @@ class Task:
             acts = [{"type": Task.ACT_LIFT_UP, "data": {}}]
         elif lift_down is True:
             acts = [{"type": Task.ACT_LIFT_DOWN, "data": {}}]
-        
-        if areaDelivery:
-            shelf_area_id = det.get("properties").get("relatedShelvesAreaId")
-            acts[0]["data"] = {"useAreaId": shelf_area_id}
-            pt = Task._mk_point(x=x, y=y, yaw=yaw, areaId=det.get("areaId"), ext={"id": shelf_area_id}, stepActs=acts)
-        else :
-            pt = Task._mk_point(x=x, y=y, yaw=yaw, areaId=det.get("areaId"), ext=ext, stepActs=acts)
 
+        pt = Task._mk_point(x=x, y=y, yaw=yaw, areaId=det.get("areaId") or det.get("relatedShelvesAreaId"),
+                            ext=ext, stepActs=acts)
         if stopRadius is not None:
             pt["stopRadius"] = float(stopRadius)
         self._taskPts.append(pt)
@@ -817,15 +812,15 @@ class Task:
 
     # --- dock drop (type 36 required) ---
 
-    # def drop_at_dock(self, dock_name: str, *, extra_ext: dict | None = None):
-    #     det = self._require_poi_type(dock_name, {Task.TYPE_DOCK}, "drop_at_dock")
-    #     x, y, yaw = self._poi_pose(dock_name)
-    #     ext = {"name": dock_name, "id": det.get("id")}
-    #     if extra_ext:
-    #         ext.update(extra_ext)
-    #     pt = Task._mk_point(x=x, y=y, yaw=yaw, areaId=det.get("areaId"), ext=ext)
-    #     self._taskPts.append(pt)
-    #     return self
+    def drop_at_dock(self, dock_name: str, *, extra_ext: dict | None = None):
+        det = self._require_poi_type(dock_name, {Task.TYPE_DOCK}, "drop_at_dock")
+        x, y, yaw = self._poi_pose(dock_name)
+        ext = {"name": dock_name, "id": det.get("id")}
+        if extra_ext:
+            ext.update(extra_ext)
+        pt = Task._mk_point(x=x, y=y, yaw=yaw, areaId=det.get("areaId"), ext=ext)
+        self._taskPts.append(pt)
+        return self
     
     def go_charge(self, charger_name: str, *, extra_ext: dict | None = None):
         det = self._require_poi_type(charger_name, {Task.TYPE_CHARGER}, "charge")
@@ -882,10 +877,10 @@ class Task:
         return self
 
     # alias for readability
-    # def dropdown(self, target_name: str, *, useArea: bool = False, lift: str | None = None):
-    #     if useArea:
-    #         return self.to_area(target_name, lift=lift)
-    #     return self.drop_at_dock(target_name)
+    def dropdown(self, target_name: str, *, useArea: bool = False, lift: str | None = None):
+        if useArea:
+            return self.to_area(target_name, lift=lift)
+        return self.drop_at_dock(target_name)
 
     def wait(self, target_name: str, seconds: float):
         """Attach a pause stepAct to the last point, or create a point at robot pose if empty."""
@@ -1018,12 +1013,12 @@ class Robot_v2(Robot_v1):
         return self
 
     def pickup_at(self, poi_name, area_delivery=False):
-        task = Task(self, "pickup", taskType="factory",runType="lift").pickup(poi_name, lift_up=True, areaDelivery=area_delivery)
+        task = Task(self, "pickup", taskType="factory",runType="lift").pickup(poi_name, lift_up=True)
         resp = create_task(**task.task_dict)
         return self
 
     def dropdown_at(self, poi_name, area_delivery=False):
-        task = Task(self, "dropdown", taskType="factory",runType="lift").pickup(poi_name, lift_down=True, areaDelivery=area_delivery)
+        task = Task(self, "dropdown", taskType="factory",runType="lift").dropdown(poi_name, useArea=area_delivery)
         resp = create_task(**task.task_dict)
         return self
 
@@ -1037,14 +1032,14 @@ class Robot_v2(Robot_v1):
         resp = create_task(**task.task_dict)
         return self
 
-    # def shelf_to_shelf(self, pickup_shelf, dropdown_shelf, area_delivery=False):
-    #     task = (
-    #         Task(self, "shelf_delivery", taskType="factory",runType="lift")
-    #         .pickup(pickup_shelf, lift_up=True)
-    #         .dropdown(dropdown_shelf, useArea=area_delivery)
-    #     )
-    #     resp = create_task(**task.task_dict)
-    #     return self
+    def shelf_to_shelf(self, pickup_shelf, dropdown_shelf, area_delivery=False):
+        task = (
+            Task(self, "shelf_delivery", taskType="factory",runType="lift")
+            .pickup(pickup_shelf, lift_up=True)
+            .dropdown(dropdown_shelf, useArea=area_delivery)
+        )
+        resp = create_task(**task.task_dict)
+        return self
     
     def evacuate(self, area_name=None, evac_pts=[]):
         pass
@@ -1056,4 +1051,4 @@ class Robot_v2(Robot_v1):
     #     if audio_dict["mp3_id"] is None:
     #         ...
     #     else :
-    #         ...   
+    #         ...
