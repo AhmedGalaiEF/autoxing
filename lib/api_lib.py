@@ -19,9 +19,10 @@ import requests
 
 try:
     import pandas as pd
+    import numpy as np
 except ImportError:
     pd = None  # Only used if caller asks for DataFrame
-
+    np = None
 # ---- Rich logging setup (drop-in, safe to call multiple times) ----
 try:
     from rich.logging import RichHandler
@@ -1124,6 +1125,96 @@ def render_full_map(robot_sn: str, out_png="map_with_layers.png"):
     log.info(f"Wrote: {out_png} (features={len(feats)})")
     return out_png
 
+def pixel_to_world(px, py_screen, *, origin_x_m, origin_y_m, res_m_per_px, img_h_px, rotation_deg=0.0):
+    """
+    Inverse of world_to_pixel(). Accepts screen Y (origin top, downwards).
+    Returns world meters (x_m, y_m).
+    """
+    # un-flip Y
+    py = img_h_px - py_screen
+    dxr, dyr = px * res_m_per_px, py * res_m_per_px
+    if rotation_deg:
+        th = math.radians(rotation_deg)
+        c, s = math.cos(th), math.sin(th)
+        # inverse rotation: [dx;dy] = [ c  s; -s  c ] [dxr;dyr]
+        dx = c * dxr + s * dyr
+        dy = -s * dxr + c * dyr
+    else:
+        dx, dy = dxr, dyr
+    return (origin_x_m + dx, origin_y_m + dy)
+
+import heapq
+
+def _astar_on_cost(cost: np.ndarray, start_rc, goal_rc, block_threshold: float = 0.99):
+    """
+    A* on a float32 cost grid in [0,1]. start_rc/goal_rc: (row, col) integers.
+    A cell is blocked if cost>=block_threshold.
+    8-connected moves, move cost = base * (1 + 10*cell_cost_at_dest).
+    Returns list of (row, col) or [] if no path.
+    """
+    H, W = cost.shape
+    def inb(r,c): return 0 <= r < H and 0 <= c < W
+    if not (inb(*start_rc) and inb(*goal_rc)): return []
+    if cost[start_rc] >= block_threshold or cost[goal_rc] >= block_threshold: return []
+
+    # precompute penalty and allowed mask
+    pen = (1.0 + 10.0 * np.clip(cost, 0.0, 1.0)).astype(np.float32)
+    blocked = cost >= block_threshold
+
+    nbrs = [(-1,0,1.0),(1,0,1.0),(0,-1,1.0),(0,1,1.0),
+            (-1,-1,math.sqrt(2)),(-1,1,math.sqrt(2)),(1,-1,math.sqrt(2)),(1,1,math.sqrt(2))]
+
+    def h(r,c):
+        dr = goal_rc[0]-r; dc = goal_rc[1]-c
+        return math.hypot(dr, dc)
+
+    start = start_rc
+    goal = goal_rc
+
+    g = {start: 0.0}
+    parent = {start: None}
+    openq = []
+    heapq.heappush(openq, (h(*start), 0.0, start))
+
+    while openq:
+        f, gcur, cur = heapq.heappop(openq)
+        if cur == goal:
+            # reconstruct
+            path = []
+            n = cur
+            while n is not None:
+                path.append(n)
+                n = parent[n]
+            path.reverse()
+            return path
+
+        if gcur > g.get(cur, float('inf')):  # stale
+            continue
+
+        r, c = cur
+        for dr, dc, w in nbrs:
+            nr, nc = r+dr, c+dc
+            if not inb(nr, nc): continue
+            if blocked[nr, nc]: continue
+            gcand = gcur + w * float(pen[nr, nc])
+            if gcand < g.get((nr, nc), float('inf')):
+                g[(nr, nc)] = gcand
+                parent[(nr, nc)] = cur
+                heapq.heappush(openq, (gcand + h(nr, nc), gcand, (nr, nc)))
+    return []
+
+def _draw_path_pixels(img: Image.Image, pts_px: list[tuple[float,float]], color=(30, 144, 255, 255), width=4):
+    dr = ImageDraw.Draw(img, "RGBA")
+    if len(pts_px) >= 2:
+        dr.line(pts_px, fill=color, width=width, joint="curve")
+    # endpoints
+    if pts_px:
+        r = 5
+        x0,y0 = pts_px[0]
+        dr.ellipse((x0-r,y0-r,x0+r,y0+r), outline=(0,0,0,220), fill=(0,255,0,220))
+        x1,y1 = pts_px[-1]
+        dr.ellipse((x1-r,y1-r,x1+r,y1+r), outline=(0,0,0,220), fill=(255,0,0,220))
+
 
 def follow_robot(robot_sn: str, out_png="map_live.png", interval=5, duration=None):
     area_id = _get_area_id_from_robot_sn(robot_sn)
@@ -1659,7 +1750,7 @@ def _point_polygon_min_dist(px, py, ring):
         dmin = min(dmin, _point_segment_dist(px, py, x1, y1, x2, y2))
     return dmin
 
-
+from PIL import ImageFilter
 
 import math
 import pandas as pd
@@ -1674,7 +1765,13 @@ class Robot_v1(Robot_v0):
         pois = clean_pois_table(pois_raw)
         areas_df, _lines_df, _points_df, scale = build_feature_tables(self.df.areaId, self.SN, pois)
         areas_rich = enrich_areas(areas_df)
-        self._ctx = {"pois": pois, "areas": areas_df, "areas_rich": areas_rich, "scale": scale}
+        self._ctx = {
+            "pois": pois,
+            "areas": areas_df,
+            "areas_rich": areas_rich,
+            "lines": _lines_df,              # <-- add this
+            "scale": scale
+        }
         return self._ctx
 
     def get_relpos_df(self):
@@ -1958,6 +2055,7 @@ class Task:
         self._curPt = Task._mk_point(x=x, y=y, yaw=y, ext={"name": "__cur__", "id": "__robot__"})
         return self
 
+
     # --- shelf pickup / lift at shelf point (type 34 required) ---
 
     def pickup(self, shelf_name: str, *, lift_up: bool | None = None, lift_down: bool | None = None,
@@ -2171,10 +2269,178 @@ class Task:
 
 # In [96]:
 
+# --- cost → colored background (low=black, high=red) ---
+def cost_to_rgba(cost: np.ndarray) -> Image.Image:
+    """
+    cost: float32 [0..1], HxW
+    returns RGBA image with cost mapped to red channel: (R=255*cost, G=0, B=0).
+    """
+    cost_u8 = (np.clip(cost, 0.0, 1.0) * 255).astype(np.uint8)
+    H, W = cost.shape
+    R = Image.fromarray(cost_u8, mode="L")
+    Z = Image.new("L", (W, H), 0)
+    A = Image.new("L", (W, H), 255)
+    return Image.merge("RGBA", (R, Z, Z, A))
+
+def _polyline_length(pts):
+    # pts: [(x,y), ...]
+    return sum(math.hypot(x2 - x1, y2 - y1) for (x1,y1), (x2,y2) in zip(pts, pts[1:]))
+
+# --- dashed polyline in pixel space ---
+def draw_dashed_polyline(draw: ImageDraw.ImageDraw, pts_px, *, dash_px=8, gap_px=6, width=3, color=(255,255,0,255)):
+    """
+    pts_px: list of (x,y). Draws a dashed line along all segments.
+    """
+    import math
+    if not pts_px or len(pts_px) < 2: return
+    dash = float(max(1, dash_px)); gap = float(max(1, gap_px))
+    pattern = [dash, gap]  # on, off
+    pat_len = sum(pattern)
+
+    for i in range(len(pts_px)-1):
+        (x1, y1), (x2, y2) = pts_px[i], pts_px[i+1]
+        vx, vy = x2 - x1, y2 - y1
+        seg_len = math.hypot(vx, vy)
+        if seg_len <= 1e-6: 
+            continue
+        ux, uy = vx/seg_len, vy/seg_len
+
+        # walk the segment with on/off pattern
+        dist = 0.0
+        on = True
+        pat_idx = 0
+        rem = pattern[pat_idx]
+        curx, cury = x1, y1
+        while dist < seg_len:
+            step = min(rem, seg_len - dist)
+            nx, ny = curx + ux*step, cury + uy*step
+            if on:
+                draw.line([(curx, cury), (nx, ny)], fill=color, width=width, joint="curve")
+            curx, cury = nx, ny
+            dist += step
+            pat_idx = (pat_idx + 1) % 2
+            rem = pattern[pat_idx]
+            on = (pat_idx == 0)
 
 
 
 class Robot_v2(Robot_v1):
+
+
+    def get_env(
+        self,
+        *,
+        dark_thresh: int = 80,          # base-map grayscale threshold (0..255): lower = darker → obstacle
+        robot_radius_m: float = 0.25,   # inflate obstacles by this radius (meters)
+        line_width_m: float = 0.10,     # thickness to rasterize lineType==2 walls (meters)
+        base_weight: float = 0.4,       # weight for dark pixels
+        area_weight: float = 1.0,       # weight for forbidden areas
+        line_weight: float = 1.0,       # weight for virtual walls
+        blur_px: int = 0,               # optional final smoothing (pixels)
+        return_uint8: bool = False      # if True → uint8 [0..255]; else float32 [0..1]
+    ) -> np.ndarray:
+        """
+        Build a cost map from base map darkness + forbidden areas (regionType==1) + virtual walls (lineType==2).
+        Returns HxW numpy array (float32 0..1 by default).
+        """
+        # --- fetch map + meta
+        area_id = self.df.areaId
+        base_img = get_base_map_image_by_area(area_id)  # PIL
+        meta_raw = get_map_meta(area_id=area_id, robot_sn=self.SN)
+        meta, _ = normalize_map_meta(meta_raw)
+        if not {"origin_x_m","origin_y_m","res_m_per_px"}.issubset(meta.keys()):
+            raise RuntimeError("map meta missing required fields (origin_x_m, origin_y_m, res_m_per_px)")
+
+        ox, oy = meta["origin_x_m"], meta["origin_y_m"]
+        res = meta["res_m_per_px"]
+        rot = float(meta.get("rotation_deg", 0.0))
+        W, H = base_img.width, base_img.height
+
+        ctx = self._refresh_context()
+        areas_df = ctx.get("areas")
+        lines_df = ctx.get("lines")
+
+        # --- base darkness mask (binary 0/255)
+        gray = base_img.convert("L")
+        dark_mask = np.asarray(gray) < int(dark_thresh)
+        base_mask = (dark_mask.astype(np.uint8) * 255)
+
+        # --- helpers to rasterize (PIL draw in image pixel space)
+        def world_poly_to_px(poly):
+            return [
+                world_to_pixel(x, y, origin_x_m=ox, origin_y_m=oy,
+                               res_m_per_px=res, img_h_px=H, rotation_deg=rot)
+                for (x, y) in poly
+            ]
+
+        def rasterize_polygons(polys):
+            if not polys:
+                return np.zeros((H, W), dtype=np.uint8)
+            m = Image.new("L", (W, H), 0)
+            dr = ImageDraw.Draw(m, "L")
+            for ring in polys:
+                if len(ring) >= 3:
+                    dr.polygon(world_poly_to_px(ring), fill=255, outline=255)
+            return np.asarray(m, dtype=np.uint8)
+
+        def rasterize_lines(lines, width_m):
+            if not lines:
+                return np.zeros((H, W), dtype=np.uint8)
+            px_w = max(1, int(round(width_m / res)))
+            m = Image.new("L", (W, H), 0)
+            dr = ImageDraw.Draw(m, "L")
+            for seg in lines:
+                pts = world_poly_to_px(seg)
+                if len(pts) >= 2:
+                    dr.line(pts, fill=255, width=px_w, joint="curve")
+            return np.asarray(m, dtype=np.uint8)
+
+        # --- forbidden areas (regionType == 1)
+        forb_polys = []
+        if isinstance(areas_df, pd.DataFrame) and not areas_df.empty:
+            forb = areas_df[(areas_df["regionType"].astype(str) == "1") & areas_df["polygon"].notna()]
+            forb_polys = forb["polygon"].tolist()
+        forb_mask = rasterize_polygons(forb_polys)
+
+        # --- virtual walls: lineType == '2'
+        wall_lines = []
+        if isinstance(lines_df, pd.DataFrame) and not lines_df.empty:
+            walls = lines_df[(lines_df["lineType"].astype(str) == "2") & lines_df["polyline"].notna()]
+            wall_lines = walls["polyline"].tolist()
+        wall_mask = rasterize_lines(wall_lines, width_m=line_width_m)
+
+        # --- combine weighted → cost in [0,1]
+        # normalize masks to 0..1 then weighted sum, clamp
+        base_f = (base_mask.astype(np.float32) / 255.0) * base_weight
+        forb_f = (forb_mask.astype(np.float32) / 255.0) * area_weight
+        wall_f = (wall_mask.astype(np.float32) / 255.0) * line_weight
+        cost = np.clip(base_f + forb_f + wall_f, 0.0, 1.0)
+
+        # --- inflate by robot radius (MaxFilter on obstacle-like portion)
+        inflate_px = int(np.ceil(float(robot_radius_m) / float(res)))
+        if inflate_px > 0:
+            # build a binary obstacle mask from cost>0, dilate, then blend back to max(cost, inflated)
+            obs = (cost > 0).astype(np.uint8) * 255
+            m = Image.fromarray(obs, mode="L")
+            # kernel size must be odd
+            k = max(1, inflate_px * 2 + 1)
+            m = m.filter(ImageFilter.MaxFilter(size=k))
+            inflated = (np.asarray(m, dtype=np.uint8) > 0).astype(np.float32)
+            cost = np.maximum(cost, inflated)
+
+        # --- optional blur (visual nicety / softening)
+        if blur_px and blur_px > 0:
+            from PIL import ImageFilter as IF
+            imgc = Image.fromarray((np.clip(cost, 0, 1) * 255).astype(np.uint8), mode="L")
+            imgc = imgc.filter(IF.GaussianBlur(radius=float(blur_px)))
+            cost = np.asarray(imgc, dtype=np.uint8).astype(np.float32) / 255.0
+
+        # --- return desired dtype
+        if return_uint8:
+            return (np.clip(cost, 0, 1) * 255).astype(np.uint8)
+        return np.clip(cost, 0, 1).astype(np.float32)
+
+
     def go_to_pose(self, pose):
         task = Task(self, "goto", taskType="delivery",runType="roam").goto(pose)
         resp = create_task(**task.task_dict)
@@ -2234,6 +2500,225 @@ class Robot_v2(Robot_v1):
 
     def wrap(self):
         pass
+
+    # def plan_path(self, poi_name: str, out_png: str = "map_with_layers_with_path.png", *, block_threshold: float = 0.99):
+    #     """
+    #     Plans a grid path from the robot's current pose to a POI by name using A* on get_env().
+    #     Draws the path over base+overlays and saves PNG. Returns dict with png and path points.
+    #     """
+    #     # --- map + meta
+    #     area_id = self.df.areaId
+    #     base = get_base_map_image_by_area(area_id)
+    #     meta_raw = get_map_meta(area_id=area_id, robot_sn=self.SN)
+    #     meta, _ = normalize_map_meta(meta_raw)
+    #     if not {"origin_x_m","origin_y_m","res_m_per_px"}.issubset(meta.keys()):
+    #         raise RuntimeError("map meta missing required fields (origin_x_m, origin_y_m, res_m_per_px)")
+    #     ox, oy = meta["origin_x_m"], meta["origin_y_m"]
+    #     res = meta["res_m_per_px"]
+    #     rot = float(meta.get("rotation_deg", 0.0))
+    #     W, H = base.width, base.height
+
+    #     # --- overlays (areas/lines/points as meters-aware GeoJSON)
+    #     feat_raw = get_map_features(area_id=area_id, robot_sn=self.SN)
+    #     feats = normalize_features_geojson(feat_raw)
+    #     # scale features to meters (matches your other funcs)
+    #     try:
+    #         pois_df = self.get_pois()
+    #     except Exception:
+    #         pois_df = None
+    #     scale = _feats_scale_from_pois(feats, pois_df)
+    #     if scale:
+    #         _scale_feats_inplace(feats, scale)
+    #     else:
+    #         flat = [abs(v) for f in feats for (x, y) in f["coords"] for v in (x, y)]
+    #         if flat and max(flat) < 0.02:
+    #             _scale_feats_inplace(feats, 1000.0)
+    #     img = draw_overlays_geojson(base, meta=meta, feats=feats)
+
+    #     # --- current pose (meters)
+    #     pose = get_robot_pose(self.SN)
+    #     sx, sy = float(pose["x"]), float(pose["y"])
+    #     # --- goal from POI name (meters)
+    #     poi_df = self.get_pois()
+    #     if isinstance(poi_df, pd.DataFrame):
+    #         target = poi_df[poi_df["name"].astype(str).str.strip() == str(poi_name).strip()]
+    #         if target.empty:
+    #             raise RuntimeError(f"POI '{poi_name}' not found")
+    #         gx, gy = float(target.iloc[0]["coordinate"][0]), float(target.iloc[0]["coordinate"][1])
+    #     else:
+    #         raise RuntimeError("POI table unavailable")
+
+    #     # --- convert to pixel coords (screen-space Y)
+    #     s_px = world_to_pixel(sx, sy, origin_x_m=ox, origin_y_m=oy, res_m_per_px=res, img_h_px=H, rotation_deg=rot)
+    #     g_px = world_to_pixel(gx, gy, origin_x_m=ox, origin_y_m=oy, res_m_per_px=res, img_h_px=H, rotation_deg=rot)
+
+    #     # --- cost grid
+    #     cost = self.get_env(return_uint8=False)  # float32 [0..1]
+    #     Hc, Wc = cost.shape
+    #     if (Hc, Wc) != (H, W):
+    #         # safety: resize cost to raster size if needed
+    #         cost_img = Image.fromarray((np.clip(cost, 0, 1) * 255).astype(np.uint8), mode="L").resize((W, H), Image.NEAREST)
+    #         cost = np.asarray(cost_img, dtype=np.uint8).astype(np.float32) / 255.0
+
+    def plan_path(self, poi_name: str, out_png: str = "map_with_layers_with_path.png", *, block_threshold: float = 0.99):
+        """
+        Draw on top of the COST image (low=black, high=red):
+          - type==1 lines dashed yellow (scaled correctly)
+          - A* path in blue
+          - robot (green circle), POI (purple circle + label)
+        Geometry is anchored to the cost grid size to avoid scale/offset drift.
+        """
+        # --- META (origin/res/rot)
+        area_id = self.df.areaId
+        meta_raw = get_map_meta(area_id=area_id, robot_sn=self.SN)
+        meta, _ = normalize_map_meta(meta_raw)
+        req = {"origin_x_m","origin_y_m","res_m_per_px"}
+        if not req.issubset(meta.keys()):
+            raise RuntimeError(f"map meta missing {req - set(meta.keys())}")
+        ox, oy = meta["origin_x_m"], meta["origin_y_m"]
+        res    = meta["res_m_per_px"]
+        rot    = float(meta.get("rotation_deg", 0.0))
+
+        # --- COST (defines raster H,W)
+        cost = self.get_env(return_uint8=False)  # float32 [0..1], HxW
+        H, W = cost.shape
+
+        # Make the image we’ll draw on
+        img = cost_to_rgba(cost)
+        dr  = ImageDraw.Draw(img, "RGBA")
+
+        # --- Current pose & target POI (world meters)
+        pose = get_robot_pose(self.SN)
+        sx, sy = float(pose["x"]), float(pose["y"])
+
+        poi_df = self.get_pois()
+        if not isinstance(poi_df, pd.DataFrame) or poi_df.empty:
+            raise RuntimeError("POI table unavailable/empty")
+        target = poi_df[poi_df["name"].astype(str).str.strip() == str(poi_name).strip()]
+        if target.empty:
+            raise RuntimeError(f"POI '{poi_name}' not found")
+        gx, gy = float(target.iloc[0]["coordinate"][0]), float(target.iloc[0]["coordinate"][1])
+
+        # --- World→Pixel using COST height (H) as the screen height
+        s_px = world_to_pixel(sx, sy, origin_x_m=ox, origin_y_m=oy, res_m_per_px=res, img_h_px=H, rotation_deg=rot)
+        g_px = world_to_pixel(gx, gy, origin_x_m=ox, origin_y_m=oy, res_m_per_px=res, img_h_px=H, rotation_deg=rot)
+
+        # --- A* over cost
+        clamp = lambda p: (min(max(int(round(p[0])), 0), W-1), min(max(int(round(p[1])), 0), H-1))
+        sxi, syi = clamp(s_px); gxi, gyi = clamp(g_px)
+        path_rc  = _astar_on_cost(cost, (syi, sxi), (gyi, gxi), block_threshold=block_threshold)
+
+        # --- Get **scaled** features (same scale as used elsewhere), then draw type==1 lines
+        feat_raw = get_map_features(area_id=area_id, robot_sn=self.SN)
+        feats    = normalize_features_geojson(feat_raw)  # coords likely need scaling (m vs km)
+        # Scale features to meters using POI-anchored factor (exactly like your overlay code)
+        try:
+            pois_df = self.get_pois()
+        except Exception:
+            pois_df = None
+        scale = _feats_scale_from_pois(feats, pois_df)
+        if scale:
+            _scale_feats_inplace(feats, scale)
+        else:
+            flat = [abs(v) for f in feats for (x, y) in f["coords"] for v in (x, y)]
+            if flat and max(flat) < 0.02:
+                _scale_feats_inplace(feats, 1000.0)
+
+        # Extract type==1 lines from feats.props.lineType
+        typ1_lines = []
+        for f in feats:
+            if f.get("kind") != "polyline":
+                continue
+            lt = str((f.get("props") or {}).get("lineType", "")).strip()
+            if lt == "1":
+                typ1_lines.append(f["coords"])
+
+        # Draw dashed yellow lines in *pixel* space using same origin/res/rot and same H
+        for seg in typ1_lines:
+            pts_px = [world_to_pixel(x, y, origin_x_m=ox, origin_y_m=oy, res_m_per_px=res, img_h_px=H, rotation_deg=rot)
+                      for (x, y) in seg]
+            draw_dashed_polyline(dr, pts_px, dash_px=10, gap_px=6, width=3, color=(255, 230, 0, 255))
+
+        # --- Path (blue) or fallback straight hint if no path
+        if path_rc:
+            path_px = [(float(c), float(r)) for (r, c) in path_rc]
+            _draw_path_pixels(img, path_px, color=(0, 102, 255, 255), width=4)
+        else:
+            _draw_path_pixels(img, [s_px, g_px], color=(120, 120, 120, 180), width=2)
+
+        # --- Robot & POI markers (green / purple) + label
+        def circ(draw, center, r, fill, outline=(0,0,0,220)):
+            x,y = center; draw.ellipse((x-r, y-r, x+r, y+r), fill=fill, outline=outline)
+        circ(dr, s_px, 6, fill=(0, 200, 0, 255))       # robot = green
+        circ(dr, g_px, 6, fill=(160, 0, 200, 255))     # poi   = purple
+        dr.text((g_px[0]+8, g_px[1]-10), str(target.iloc[0].get("name") or poi_name), fill=(255,255,255,255))
+
+        # --- Save & return world path
+        img.save(out_png)
+
+        path_world = []
+        if path_rc:
+            for (r, c) in path_rc:
+                wx, wy = pixel_to_world(float(c), float(r),
+                                        origin_x_m=ox, origin_y_m=oy,
+                                        res_m_per_px=res, img_h_px=H, rotation_deg=rot)
+                path_world.append((wx, wy))
+
+        
+        length_m  = _polyline_length(path_world) if path_world else 0.0
+        length_px = _polyline_length(path_px)    if path_rc    else 0.0  # if you want pixels too
+
+        return {
+            "png": out_png,
+            "pixels": (path_px if path_rc else []),
+            "world": path_world,
+            "length_m": length_m,    # total path length in meters
+            "length_px": length_px,  # (optional) same in pixels
+        }
+
+
+
+        # --- clamp and index as (row, col)
+        def _clamp_pt(p):
+            x, y = p
+            return (min(max(int(round(x)), 0), W-1),
+                    min(max(int(round(y)), 0), H-1))
+        sxi, syi = _clamp_pt(s_px)
+        gxi, gyi = _clamp_pt(g_px)
+        start_rc = (syi, sxi)
+        goal_rc  = (gyi, gxi)
+
+        # --- A* path (list of (row, col))
+        path_rc = _astar_on_cost(cost, start_rc, goal_rc, block_threshold=block_threshold)
+        if not path_rc:
+            # still write an image with start/goal
+            _draw_path_pixels(img, [s_px, g_px], color=(200,200,200,200), width=2)
+            img.save(out_png)
+            log.warning("No path found; saved straight-line placeholder.")
+            return {"png": out_png, "pixels": [], "world": []}
+
+        # --- pixels (x,y) for drawing
+        path_px = [(float(c), float(r)) for (r, c) in path_rc]
+
+        # --- draw path
+        _draw_path_pixels(img, path_px, color=(30,144,255,255), width=4)
+
+        # --- also draw the robot arrow on top for direction
+        draw_robot_arrow(img, meta, pose, length_m=0.8, color=(255,0,0,220))
+
+        # --- save
+        img.save(out_png)
+
+        # --- convert to world meters
+        path_world = [
+            pixel_to_world(px, py,
+                           origin_x_m=ox, origin_y_m=oy,
+                           res_m_per_px=res, img_h_px=H, rotation_deg=rot)
+            for (px, py) in path_px
+        ]
+
+        return {"png": out_png, "pixels": path_px, "world": path_world}
+
 
     # def say(self, audio_dict):
     #     if audio_dict["mp3_id"] is None:
