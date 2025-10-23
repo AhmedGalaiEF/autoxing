@@ -241,6 +241,53 @@ def pt(p: Dict[str, Any], acts=None, stopRadius=1.0) -> Dict[str, Any]:
 def back_pt(p: Dict[str, Any]) -> Dict[str, Any]:
     return {"x": p["x"], "y": p["y"], "yaw": p["yaw"], "areaId": p["areaId"], "stopRadius": 1.0, "ext": {"id": p.get("id"), "name": p.get("name")}}
 
+
+# ---- Region targeting (drop-down) ----
+REGION_OPTIONS = ["Euroboxen", "Sichtlager", "Divers-Links", "Divers-Rechts"]
+
+def _highest_numbered_name(df: pd.DataFrame, rx: re.Pattern) -> Optional[str]:
+    """
+    Return the matching name with the highest trailing integer.
+    """
+    if df.empty or "name" not in df.columns:
+        return None
+    names = df["name"].astype(str)
+    cand = names[names.str.match(rx)]
+    if cand.empty:
+        return None
+    def tail_num(s: str) -> int:
+        try:
+            return int(s.split()[-1])
+        except Exception:
+            return -1
+    best = max(cand, key=lambda s: tail_num(str(s)))
+    return str(best)
+
+def _resolve_region_to_poi_name(region: str) -> Optional[str]:
+    """
+    Map region label -> actual POI name according to your rules.
+    """
+    df = _poi_df()
+    if region == "Euroboxen":
+        return _highest_numbered_name(df, RX_EURO)
+    if region == "Sichtlager":
+        return _highest_numbered_name(df, RX_SICHT)
+    if region == "Divers-Links":
+        # Prefer exact "Div 8", else any 'Div <N>' with N==8 (case-insensitive)
+        s = _first_match_name(df, "Div 8", regex=False)
+        if s: return s
+        cand = df["name"].astype(str)
+        m = cand[cand.str.match(r"(?i)^Div\s*8$")]
+        return str(m.iloc[0]) if not m.empty else None
+    if region == "Divers-Rechts":
+        s = _first_match_name(df, "Div 4", regex=False)
+        if s: return s
+        cand = df["name"].astype(str)
+        m = cand[cand.str.match(r"(?i)^Div\s*4$")]
+        return str(m.iloc[0]) if not m.empty else None
+    return None
+
+
 # ===== Logging buffer =====
 from collections import deque, defaultdict
 LOG_BUF = deque(maxlen=1500)
@@ -329,6 +376,71 @@ class FSMState(Enum):
     ABORTED = auto()
 
 
+# ===== Round-trip gating =====
+ROUNDTRIP_TIMEOUT_S = 600  # tweak as you like
+
+def _is_at(robot: Robot, target: Dict[str, Any], radius_m: float) -> bool:
+    try:
+        curr = robot.get_curr_pos()
+        return _distance(curr, target) <= radius_m
+    except Exception:
+        return False
+
+def _wait_until_depart(robot: Robot, point: Dict[str, Any], radius_m: float, timeout_s: float) -> bool:
+    deadline = time.monotonic() + timeout_s
+    
+    while time.monotonic() < deadline:
+        curr = robot.get_curr_pos()
+        if not _is_at(robot, point, radius_m):
+            _log(f"[Gate] Departed '{point.get('name','?')}'")
+            return True
+        time.sleep(POLL_SEC)
+        _log(f"waiting to depart {point.get('name','?')}")
+        _log(f"distance from {point.get('name','?')}:")
+        _log(_distance(curr, point))
+    _log(f"[Gate] depart timeout from '{point.get('name','?')}'")
+    return False
+
+def _wait_until_arrive(robot: Robot, point: Dict[str, Any], radius_m: float, timeout_s: float) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        curr = robot.get_curr_pos()
+        if _is_at(robot, point, radius_m):
+            _log(f"[Gate] Arrived at '{point.get('name','?')}'")
+            return True
+        time.sleep(POLL_SEC)
+        _log(f"waiting to arrive at {point.get('name','?')}")
+        _log(f"distance from {point.get('name','?')}:")
+        _log(_distance(curr, point))
+    _log(f"[Gate] arrive timeout to '{point.get('name','?')}'")
+    return False
+
+def wrapper_roundtrip_gate(robot: Robot,
+                           waiting: Dict[str, Any],
+                           wrapper: Dict[str, Any],
+                           radius_m: float = ARRIVE_DIST_M,
+                           timeout_s: float = ROUNDTRIP_TIMEOUT_S) -> bool:
+    """
+    Require: leave WAITING -> visit WRAPPER -> return to WAITING (each within radius).
+    Returns True when the sequence completes; False on timeout.
+    """
+    _log("[Gate] Round-trip: waiting → wrapper → waiting")
+
+    # 1) Leave waiting (if already away, this passes immediately)
+    if not _wait_until_depart(robot, waiting, radius_m, timeout_s):
+        return False
+
+    # 2) Hit wrapper once
+    if not _wait_until_arrive(robot, wrapper, radius_m, timeout_s):
+        return False
+
+    # 3) Return to waiting
+    if not _wait_until_arrive(robot, waiting, radius_m, timeout_s):
+        return False
+
+    _log("[Gate] Round-trip satisfied.")
+    return True
+
 class RowSpec:
     __slots__ = ("ui_idx","pickup","drop","wrapper","use_wrapper")
     def __init__(self, ui_idx:int, pickup:Dict[str,Any], drop:Dict[str,Any], wrapper:Optional[Dict[str,Any]], use_wrapper:bool):
@@ -397,12 +509,18 @@ class FSMRunner(threading.Thread):
                 elif self.state == FSMState.SUBMIT_A:
                     try:
                         if row.use_wrapper:
+                            from api_lib_v1 import Robot_v2, Task
+                            temprob = Robot_v2(rob.SN)
                             name = f"r{self.row_idx+1}_A_{int(time.time())}"
-                            self._create(rob, name, [
+                            ptts = [
                                 pt(row.pickup, acts=[act_lift_up()]),
                                 pt(row.wrapper, acts=[act_lift_down()]),
                                 pt(self.waiting),
-                            ])
+                            ]
+                            task = Task(temprob, "area", taskType="factory",runType="lift").pickup(ptts[0]['ext']['name'], lift_up=True).pickup(ptts[1]['ext']['name'], lift_down=True).back("Warten")
+                            print(task.task_dict)
+                            # resp = create_task(**task.task_dict)
+                            # self._create(rob, name, ptts)
                             self.state = FSMState.PREPARE_PULSE
                         else:
                             name = f"r{self.row_idx+1}_{int(time.time())}"
@@ -415,7 +533,8 @@ class FSMRunner(threading.Thread):
                             from api_lib_v1 import Robot_v2, Task
                             temprob = Robot_v2(rob.SN)
                             task = Task(temprob, "area", taskType="factory",runType="lift").pickup(ptts[0]['ext']['name'], lift_up=True, areaDelivery=False).pickup(ptts[1]['ext']['name'], lift_down=True, areaDelivery=True).back("Warten")
-                            resp = create_task(**task.task_dict)
+                            # resp = create_task(**task.task_dict)
+                            print(task.task_dict)
                             _log(f"[FSM] Row {self.row_idx+1}: confirmation dwell {ROW_GATE_DWELL_SEC:.0f}s at waiting")
                             if not depart_then_dwell(rob, self.waiting, ARRIVE_DIST_M, ROW_GATE_DWELL_SEC):
                                 _log("[FSM] confirmation dwell failed → ABORTED"); self.state = FSMState.ABORTED; continue
@@ -423,12 +542,33 @@ class FSMRunner(threading.Thread):
                     except Exception as e:
                         _log(f"[FSM] SUBMIT_A failed: {e}"); self.state = FSMState.ABORTED
 
+                # elif self.state == FSMState.PREPARE_PULSE:
+                #     _log(f"[FSM] Pre-pulse dwell {PRE_PULSE_DWELL_S:.0f}s at waiting")
+                #     if dwell_until(rob, self.waiting, ARRIVE_DIST_M, PRE_PULSE_DWELL_S):
+                #         self.state = FSMState.PULSE
+                #     else:
+                #         _log("[FSM] pre-pulse dwell failed → ABORTED"); self.state = FSMState.ABORTED
+
                 elif self.state == FSMState.PREPARE_PULSE:
-                    _log(f"[FSM] Pre-pulse dwell {PRE_PULSE_DWELL_S:.0f}s at waiting")
+                    # New gate: leave waiting → be at wrapper → return to waiting
+                    row = self.rows[self.row_idx]
+                    if not row.wrapper:
+                        _log("[FSM] PREPARE_PULSE: wrapper POI missing → ABORTED")
+                        self.state = FSMState.ABORTED
+                        continue
+
+                    _log(f"[FSM] Gate before pre-pulse: require waiting→wrapper→waiting (radius {ARRIVE_DIST_M} m)")
+                    if not wrapper_roundtrip_gate(rob, self.waiting, row.wrapper, ARRIVE_DIST_M, ROUNDTRIP_TIMEOUT_S):
+                        _log("[FSM] Gate failed → ABORTED")
+                        self.state = FSMState.ABORTED
+                        continue
+
+                    _log(f"[FSM] Pre-pulse dwell {PRE_PULSE_DWELL_S:.0f}s at waiting (gate passed)")
                     if dwell_until(rob, self.waiting, ARRIVE_DIST_M, PRE_PULSE_DWELL_S):
                         self.state = FSMState.PULSE
                     else:
-                        _log("[FSM] pre-pulse dwell failed → ABORTED"); self.state = FSMState.ABORTED
+                        _log("[FSM] pre-pulse dwell failed → ABORTED")
+                        self.state = FSMState.ABORTED
 
                 elif self.state == FSMState.PULSE:
                     _pulse_gpio()
@@ -452,7 +592,8 @@ class FSMRunner(threading.Thread):
                         from api_lib_v1 import Robot_v2, Task
                         temprob = Robot_v2(rob.SN)
                         task = Task(temprob, "area", taskType="factory",runType="lift").pickup(ptts[0]['ext']['name'], lift_up=True, areaDelivery=True).pickup(ptts[1]['ext']['name'], lift_down=True, areaDelivery=True).back("Warten")
-                        resp = create_task(**task.task_dict)
+                        print(task.task_dict)
+                        # resp = create_task(**task.task_dict)
                         _log(f"[FSM] Row {self.row_idx+1}: confirmation dwell {ROW_GATE_DWELL_SEC:.0f}s at waiting")
                         if not depart_then_dwell(rob, self.waiting, ARRIVE_DIST_M, ROW_GATE_DWELL_SEC):
                             _log("[FSM] B completion dwell failed → ABORTED"); self.state = FSMState.ABORTED; continue
@@ -530,9 +671,14 @@ def row_ui(i: int) -> dbc.Card:
                     options=[], placeholder="Pickup (any POI)",
                     searchable=False, clearable=False, className="dash-dropdown"
                 ), width=3),
+                # dcc.Dropdown(
+                #     id={"type":"drop-dd","index":i},
+                #     options=[], placeholder="Drop (Euroboxen / Sichtlager / Divers-Links / Divers-Rechts)",
+                #     searchable=False, clearable=False, className="dash-dropdown"
+                # ),
                 dbc.Col(dcc.Dropdown(
                     id={"type":"drop-dd","index":i},
-                    options=[], placeholder="Drop (any POI)",
+                    options=[], placeholder="Drop (any Region)",
                     searchable=False, clearable=False, className="dash-dropdown"
                 ), width=5),
                 dbc.Col(dbc.Checklist(
@@ -592,23 +738,42 @@ def _runner_clear_global():
    State("robot-id", "value"),
    prevent_initial_call=False
 )
+# def on_load_robot(n, robot_id):
+#    rid = (robot_id or "").strip() or DEFAULT_ROBOT_ID
+#    _log(f"[UI] Load robot → '{rid}' (clicks={n})")
+#    try:
+#        set_robot(rid)  # single instance swap here
+#        picks = _all_poi_names()
+#        picks = _pickups(rid)
+#        drops = picks
+#        drops = _drops(rid)
+#        wait  = _find_waiting()
+#    except Exception as e:
+#        _log(f"[UI] load robot error: {e}")
+#        picks, drops, wait = [], [], None
+#    hint = f"Active robot: {rid}"
+#    waiting_text = f"Waiting point (fixed): {wait['name'] if wait else '(missing)'}"
+#    state = {"robot_id": rid, "waiting": wait}
+#    return state, hint, waiting_text, *([_opts(picks)]*4), *([_opts(drops)]*4)
 def on_load_robot(n, robot_id):
-   rid = (robot_id or "").strip() or DEFAULT_ROBOT_ID
-   _log(f"[UI] Load robot → '{rid}' (clicks={n})")
-   try:
-       set_robot(rid)  # single instance swap here
-       picks = _all_poi_names()
-       picks = _pickups(rid)
-       drops = picks
-       drops = _drops(rid)
-       wait  = _find_waiting()
-   except Exception as e:
-       _log(f"[UI] load robot error: {e}")
-       picks, drops, wait = [], [], None
-   hint = f"Active robot: {rid}"
-   waiting_text = f"Waiting point (fixed): {wait['name'] if wait else '(missing)'}"
-   state = {"robot_id": rid, "waiting": wait}
-   return state, hint, waiting_text, *([_opts(picks)]*4), *([_opts(drops)]*4)
+    rid = (robot_id or "").strip() or DEFAULT_ROBOT_ID
+    _log(f"[UI] Load robot → '{rid}' (clicks={n})")
+    try:
+        set_robot(rid)
+        picks = _pickups(rid)                   # keep pickup list as-is (POIs)
+        drops = REGION_OPTIONS                  # <<< region labels only
+        wait  = _find_waiting()
+    except Exception as e:
+        _log(f"[UI] load robot error: {e}")
+        picks, drops, wait = [], [], None
+
+    hint = f"Active robot: {rid}"
+    waiting_text = f"Waiting point (fixed): {wait['name'] if wait else '(missing)'}"
+    state = {"robot_id": rid, "waiting": wait}
+
+    # pickup options = POI names; drop options = fixed region labels
+    return state, hint, waiting_text, *([_opts(picks)]*4), *([_opts(drops)]*4)
+
 
 from dash import ctx
 
@@ -650,7 +815,13 @@ def handle_actions(n_start, n_back, rstate, *state):
             if "on" not in (includes[i] or []):
                 continue
             pick = _find_poi(pickups[i]) if pickups[i] else None
-            drop = _find_poi(drops[i])   if drops[i]   else None
+            # drop = _find_poi(drops[i])   if drops[i]   else None
+            resolved_drop_name = _resolve_region_to_poi_name(drops[i]) if drops[i] else None
+            _log(f"resolved poi name: {resolved_drop_name}")
+            drop = _find_poi(resolved_drop_name) if resolved_drop_name else None
+            if drops[i] and not drop:
+                _log(f"[UI] Drop region '{drops[i]}' could not be resolved to a POI")
+
             if not pick or not drop:
                 continue
             use_wrapper = ("on" in (wchecks[i] or []))
@@ -689,13 +860,13 @@ def handle_actions(n_start, n_back, rstate, *state):
                 body = [
                     pt(wait, acts=[act_pause(1)]),  # tiny pause to be visible in logs
                 ]
-                create_task(
-                    task_name=name, robot=get_robot().df,
-                    runType=RUN_TYPE_LIFT, sourceType=SOURCE_SDK,
-                    taskPts=body, runNum=1, taskType=TASK_TYPE_LIFT,
-                    routeMode=ROUTE_SEQ, runMode=RUNMODE_FLEX, speed=1.0,
-                    detourRadius=1.0, ignorePublicSite=False, backPt=back_pt(wait)
-                )
+                # create_task(
+                #     task_name=name, robot=get_robot().df,
+                #     runType=RUN_TYPE_LIFT, sourceType=SOURCE_SDK,
+                #     taskPts=body, runNum=1, taskType=TASK_TYPE_LIFT,
+                #     routeMode=ROUTE_SEQ, runMode=RUNMODE_FLEX, speed=1.0,
+                #     detourRadius=1.0, ignorePublicSite=False, backPt=back_pt(wait)
+                # )
                 _log("[UI] Cancel: sent 'go Standby' task.")
         except Exception as e:
             _log(f"[UI] Cancel: standby task failed: {e}")
