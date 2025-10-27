@@ -106,7 +106,7 @@ def compute_best_assignment(robots: list[Robot], evac_pts: list[dict]):
     pairs = []
     for r in robots:
         state = r.get_state()
-        print(state["isAt"])
+        log(state["isAt"])
         for p in evac_pts:
             L = plan_length(r, p)
             pairs.append((L, r.SN, p["id"]))
@@ -216,46 +216,48 @@ class EvacPlanner:
 
         try:
             while True:
-                with self._lock:
-                    if self._stop: break
+                try:
+                    with self._lock:
+                        if self._stop: break
 
-                alarm = is_alarm_active()
-                now = time.time()
+                    alarm = is_alarm_active()
+                    now = time.time()
 
-                if alarm:
-                    # rising edge → immediate dispatch
-                    if not last_alarm:
-                        log("ALARM detected → dispatch now (first wave)")
-                        if not self._robots:
+                    if alarm:
+                        # rising edge → immediate dispatch
+                        if not last_alarm:
+                            log("ALARM detected → dispatch now (first wave)")
+                            if not self._robots:
+                                self.refresh_inputs()
+                            if not self._cached_targets:
+                                self.recompute_assignments_if_due(force=True)
+                            dispatch_to_cached_targets(self._robots, self._cached_targets)
+                            self._last_dispatch_ts = now
+
+                        # while alarm remains active → re-dispatch only on cooldown
+                        elif (now - self._last_dispatch_ts) >= RESEND_COOLDOWN_SEC:
+                            log("ALARM still active → re-dispatch after cooldown")
+                            # optional: refresh targets before re-dispatch
+                            if not self._cached_targets:
+                                self.refresh_inputs()
+                                self.recompute_assignments_if_due(force=True)
+                            dispatch_to_cached_targets(self._robots, self._cached_targets)
+                            self._last_dispatch_ts = now
+
+                    else:
+                        # alarm cleared → reset resend gate and keep planning in background
+                        if last_alarm:
+                            log("Alarm cleared → reset resend gate")
+                        # light background maintenance
+                        if (now - self._last_assign_ts) >= ASSIGN_REFRESH_SEC:
                             self.refresh_inputs()
-                        if not self._cached_targets:
                             self.recompute_assignments_if_due(force=True)
-                        dispatch_to_cached_targets(self._robots, self._cached_targets)
-                        self._last_dispatch_ts = now
 
-                    # while alarm remains active → re-dispatch only on cooldown
-                    elif (now - self._last_dispatch_ts) >= RESEND_COOLDOWN_SEC:
-                        log("ALARM still active → re-dispatch after cooldown")
-                        # optional: refresh targets before re-dispatch
-                        if not self._cached_targets:
-                            self.refresh_inputs()
-                            self.recompute_assignments_if_due(force=True)
-                        dispatch_to_cached_targets(self._robots, self._cached_targets)
-                        self._last_dispatch_ts = now
-
-                else:
-                    # alarm cleared → reset resend gate and keep planning in background
-                    if last_alarm:
-                        log("Alarm cleared → reset resend gate")
-                    # light background maintenance
-                    if (now - self._last_assign_ts) >= ASSIGN_REFRESH_SEC:
-                        self.refresh_inputs()
-                        self.recompute_assignments_if_due(force=True)
-
-                last_alarm = alarm
-                time.sleep(POLL_INTERVAL_SEC)
-        except KeyboardInterrupt:
-            print("Loop Stopped by User")
+                    last_alarm = alarm
+                    time.sleep(POLL_INTERVAL_SEC)
+                except KeyboardInterrupt:
+                    break
+                    log("Loop Stopped by User")
         finally:
             GPIO.cleanup()
 
