@@ -105,6 +105,8 @@ def compute_best_assignment(robots: list[Robot], evac_pts: list[dict]):
     if not robots or not evac_pts: return {}
     pairs = []
     for r in robots:
+        state = r.get_state()
+        print(state["isAt"])
         for p in evac_pts:
             L = plan_length(r, p)
             pairs.append((L, r.SN, p["id"]))
