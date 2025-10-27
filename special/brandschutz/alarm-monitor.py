@@ -129,7 +129,7 @@ def get_robot_local_evac_candidates(robot: Robot, global_evacs_by_id: Dict[str, 
     try:
         if VERBOSE_REPLAN_LOGS:
             log(f"[{robot.SN}] querying state (min_dist_area={BRANDSCHUTZ_RADIUS_M:.0f}m)…")
-        st = robot.get_state(min_dist_area=BRANDSCHUTZ_RADIUS_M)
+        st = robot.get_state(poi_threshold=BRANDSCHUTZ_RADIUS_M/2, min_dist_area=BRANDSCHUTZ_RADIUS_M)
         is_at = st.get("isAt")
         if not brandschutz_ok(is_at):
             log(f"[{robot.SN}] Not within {BRANDSCHUTZ_RADIUS_M:.0f} m of a Brandschutz area → skip.")
