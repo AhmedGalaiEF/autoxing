@@ -115,11 +115,15 @@ def compute_best_assignment(robots: list[Robot], evac_pts: list[dict]):
     assigned, used_pts = {}, set()
     by_id = {p["id"]: p for p in evac_pts}
     for L, rid, pid in pairs:
-        if rid in assigned or pid in used_pts: continue
-        if not math.isfinite(L): continue
-        assigned[rid] = by_id[pid] | {"planned_length_m": L}
-        used_pts.add(pid)
-        if len(assigned) >= len(robots): break
+        try:
+            if rid in assigned or pid in used_pts: continue
+            if not math.isfinite(L): continue
+            assigned[rid] = by_id[pid] | {"planned_length_m": L}
+            used_pts.add(pid)
+            if len(assigned) >= len(robots): break
+        except KeyboardInterrupt:
+            break
+            print("Assignment interrupted by User")
     return assigned
 
 def dispatch_to_cached_targets(robots: list[Robot], cache: dict[str, dict]):
