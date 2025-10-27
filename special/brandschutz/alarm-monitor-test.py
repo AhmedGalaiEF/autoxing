@@ -389,8 +389,8 @@ class EvacPlanner:
                 time.sleep(POLL_INTERVAL_SEC)
 
                 if now - getattr(self, "_last_heartbeat", 0.0) >= HEARTBEAT_SEC:
-                log(f"[hb] alarm={alarm} cached_targets={len(self._cached_targets)} last_replan={int(now - self._last_assign_ts)}s ago")
-                self._last_heartbeat = now
+                    log(f"[hb] alarm={alarm} cached_targets={len(self._cached_targets)} last_replan={int(now - self._last_assign_ts)}s ago")
+                    self._last_heartbeat = now
 
 
         except KeyboardInterrupt:
