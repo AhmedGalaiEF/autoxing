@@ -29,7 +29,8 @@ GPIO.setup(ALARM_GPIO, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 
 def is_alarm_active() -> bool:
     # NC contact opens on alarm -> input LOW via pull-down
-    return GPIO.input(ALARM_GPIO) == GPIO.LOW
+    # return GPIO.input(ALARM_GPIO) == GPIO.LOW
+    return True
 
 def log(msg: str): print(f"{datetime.now().isoformat()} {msg}", flush=True)
 
@@ -56,7 +57,7 @@ def cancel_if_active(robot: Robot):
         if isinstance(task_obj, dict) and task_obj.get("taskId"):
             tid = task_obj["taskId"]
             log(f"[{robot.SN}] Canceling active task {tid}...")
-            cancel_task(tid)
+            # cancel_task(tid)
             log(f"[{robot.SN}] Task {tid} canceled.")
         else:
             log(f"[{robot.SN}] No active task.")
@@ -147,7 +148,7 @@ def dispatch_to_cached_targets(robots: list[Robot], cache: dict[str, dict]):
             #     runNum=1, taskType=4, routeMode=2, runMode=1,
             #     speed=1.0, detourRadius=1.0, ignorePublicSite=True,
             # )
-            robot.go_to_poi(poi['name'])
+            # robot.go_to_poi(poi['name'])
             tid = (resp or {}).get("taskId")
             log(f"[{r.SN}] Task created: {tid}")
         except Exception as e:

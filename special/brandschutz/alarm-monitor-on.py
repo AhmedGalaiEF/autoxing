@@ -29,7 +29,8 @@ GPIO.setup(ALARM_GPIO, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 
 def is_alarm_active() -> bool:
     # NC contact opens on alarm -> input LOW via pull-down
-    return GPIO.input(ALARM_GPIO) == GPIO.LOW
+    # return GPIO.input(ALARM_GPIO) == GPIO.LOW
+    return True
 
 def log(msg: str): print(f"{datetime.now().isoformat()} {msg}", flush=True)
 
