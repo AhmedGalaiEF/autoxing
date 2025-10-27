@@ -18,7 +18,7 @@ ALARM_GPIO = 17
 HEARTBEAT_SEC = 5
 # --- timings ---
 POLL_INTERVAL_SEC   = 0.2    # fast alarm polling
-ASSIGN_REFRESH_SEC  = 10     # preplan refresh while idle
+ASSIGN_REFRESH_SEC  = 120     # preplan refresh while idle
 RESEND_COOLDOWN_SEC = 60     # ONLY throttles re-cancel/re-dispatch
 VERBOSE_REPLAN_LOGS = True  # set False if too chatty
 
@@ -358,8 +358,6 @@ class EvacPlanner:
                 now = time.time()
 
                 if alarm:
-                    # Try to keep assignments fresh even during alarm
-                    self.recompute_assignments_if_due(force=False)
 
                     if not last_alarm:
                         log("ALARM detected → dispatch now (first wave)")
@@ -378,6 +376,8 @@ class EvacPlanner:
                             self.recompute_assignments_if_due(force=True)
                         dispatch_to_cached_targets(self._robots, self._cached_targets)
                         self._last_dispatch_ts = now
+                    # Try to keep assignments fresh even during alarm
+                    self.recompute_assignments_if_due(force=False)
 
                 else:
                     # Idle background maintenance
