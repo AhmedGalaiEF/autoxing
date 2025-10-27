@@ -15,11 +15,12 @@ from api_lib import (
 
 BUSINESS_NAME_PREFIX = "Assa Abloy"
 ALARM_GPIO = 17
-
+HEARTBEAT_SEC = 5
 # --- timings ---
 POLL_INTERVAL_SEC   = 0.2    # fast alarm polling
 ASSIGN_REFRESH_SEC  = 10     # preplan refresh while idle
 RESEND_COOLDOWN_SEC = 60     # ONLY throttles re-cancel/re-dispatch
+VERBOSE_REPLAN_LOGS = True  # set False if too chatty
 
 EVAC_REGEX = r"(?i)^Evac.*"
 BRANDSCHUTZ_REGEX = r"(?i)^Brandschutz$"  # exact name match, case-insensitive
@@ -129,6 +130,7 @@ def get_robot_local_evac_candidates(robot: Robot, global_evacs_by_id: dict) -> l
     - return only Evac.* POIs present in st['isAt'] for this robot, mapped to full POI dicts from global list.
     """
     try:
+        log(f"getting robot state... [{robot.SN}]")
         st = robot.get_state(min_dist_area=BRANDSCHUTZ_RADIUS_M)
         is_at = st.get("isAt")
         if not brandschutz_ok(is_at):
@@ -278,6 +280,7 @@ class EvacPlanner:
         self._evac_pts: list[dict] = []
         self._last_assign_ts = 0.0
         self._last_dispatch_ts = 0.0  # gates re-send while alarm stays active
+        self._last_heartbeat = 0.0
 
     def stop(self):
         with self._lock:
@@ -308,17 +311,35 @@ class EvacPlanner:
 
     def recompute_assignments_if_due(self, force=False):
         now = time.time()
-        if not force and (now - self._last_assign_ts) < ASSIGN_REFRESH_SEC:
+        due = (now - self._last_assign_ts) >= ASSIGN_REFRESH_SEC
+        if not force and not due:
+            if VERBOSE_REPLAN_LOGS:
+                remaining = ASSIGN_REFRESH_SEC - (now - self._last_assign_ts)
+                log(f"[replan] skipped (cooldown {remaining:.1f}s)")
             return
         if not self._robots or not self._evac_pts:
+            if VERBOSE_REPLAN_LOGS:
+                log("[replan] skipped (no robots or no Evac.* POIs)")
             return
+
         log(f"Preplanning optimal assignments (Brandschutz≤{BRANDSCHUTZ_RADIUS_M:.0f} m)…")
         new_map = compute_best_assignment(self._robots, self._evac_pts, self.should_stop)
+
         with self._lock:
+            old = self._cached_targets
             self._cached_targets = new_map
             self._last_assign_ts = now
+
         if not new_map:
-            log("No feasible assignments under current constraints.")
+            log("[replan] no feasible assignments.")
+        else:
+            brief = ", ".join(f"{rid}→{v['name']} (~{v['planned_length_m']:.1f} m)"
+                              for rid, v in new_map.items())
+            if old != new_map:
+                log(f"[replan] updated: {brief}")
+            elif VERBOSE_REPLAN_LOGS:
+                log(f"[replan] unchanged: {brief}")
+
 
     def run(self):
         self.refresh_inputs()
@@ -337,7 +358,9 @@ class EvacPlanner:
                 now = time.time()
 
                 if alarm:
-                    # rising edge → immediate dispatch
+                    # Try to keep assignments fresh even during alarm
+                    self.recompute_assignments_if_due(force=False)
+
                     if not last_alarm:
                         log("ALARM detected → dispatch now (first wave)")
                         if not self._robots:
@@ -347,27 +370,28 @@ class EvacPlanner:
                         dispatch_to_cached_targets(self._robots, self._cached_targets)
                         self._last_dispatch_ts = now
 
-                    # while alarm remains active → re-dispatch only on cooldown
                     elif (now - self._last_dispatch_ts) >= RESEND_COOLDOWN_SEC:
                         log("ALARM still active → re-dispatch after cooldown")
-                        # optional: refresh targets before re-dispatch
-                        if not self._cached_targets:
+                        # (optional) refresh inputs infrequently
+                        if (now - self._last_assign_ts) >= ASSIGN_REFRESH_SEC:
                             self.refresh_inputs()
                             self.recompute_assignments_if_due(force=True)
                         dispatch_to_cached_targets(self._robots, self._cached_targets)
                         self._last_dispatch_ts = now
 
                 else:
-                    # alarm cleared → reset resend gate and keep planning in background
-                    if last_alarm:
-                        log("Alarm cleared → reset resend gate")
-                    # light background maintenance
+                    # Idle background maintenance
                     if (now - self._last_assign_ts) >= ASSIGN_REFRESH_SEC:
                         self.refresh_inputs()
-                        self.recompute_assignments_if_due(force=True)
+                    self.recompute_assignments_if_due(force=False)
 
                 last_alarm = alarm
                 time.sleep(POLL_INTERVAL_SEC)
+
+                if now - getattr(self, "_last_heartbeat", 0.0) >= HEARTBEAT_SEC:
+                log(f"[hb] alarm={alarm} cached_targets={len(self._cached_targets)} last_replan={int(now - self._last_assign_ts)}s ago")
+                self._last_heartbeat = now
+
 
         except KeyboardInterrupt:
             log("Loop stopped by user (Ctrl+C).")
