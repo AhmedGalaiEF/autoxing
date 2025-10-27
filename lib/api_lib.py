@@ -1856,39 +1856,83 @@ class Robot_v1(Robot_v0):
 
         return relpos
 
+    # def get_state(self, poi_threshold: float = 0.5, min_dist_area: float = 1.0):
+    #     """
+    #     POIs:  isAt if distance_m <= poi_threshold
+    #     Areas: isAt if centroid_dist_m > min_dist_area   (as requested)
+    #     """
+    #     base = super().get_state()
+    #     try:
+    #         rel = self.get_relpos_df()
+
+    #         # build masks
+    #         poi_mask = (rel["kind"] == "poi")
+    #         area_mask = (rel["kind"] == "area")
+
+    #         is_at_poi = pd.Series(False, index=rel.index)
+    #         is_at_area = pd.Series(False, index=rel.index)
+
+    #         if poi_mask.any():
+    #             is_at_poi[poi_mask] = rel.loc[poi_mask, "distance_m"] <= float(poi_threshold)
+
+    #         if area_mask.any():
+    #             # your rule
+    #             is_at_area[area_mask] = rel.loc[area_mask, "centroid_dist_m"] < float(min_dist_area)
+
+    #         is_at = rel[is_at_poi | is_at_area].reset_index(drop=True)
+
+    #         base["relPos"] = rel
+    #         base["isAt"] = is_at
+    #         base["params"] = {"poi_threshold": float(poi_threshold), "min_dist_area": float(min_dist_area)}
+    #     except Exception:
+    #         log.exception("failed to compute relPos/isAt")
+    #         base["relPos"] = pd.DataFrame()
+    #         base["isAt"] = pd.DataFrame()
+    #     return base
+
     def get_state(self, poi_threshold: float = 0.5, min_dist_area: float = 1.0):
         """
         POIs:  isAt if distance_m <= poi_threshold
-        Areas: isAt if centroid_dist_m > min_dist_area   (as requested)
+        Areas: isAt if centroid_dist_m < min_dist_area
         """
         base = super().get_state()
         try:
             rel = self.get_relpos_df()
 
-            # build masks
-            poi_mask = (rel["kind"] == "poi")
-            area_mask = (rel["kind"] == "area")
+            # boolean masks (vectorized; no intermediate assignment to a bool Series)
+            poi_mask   = rel["kind"].eq("poi")
+            area_mask  = rel["kind"].eq("area")
 
-            is_at_poi = pd.Series(False, index=rel.index)
-            is_at_area = pd.Series(False, index=rel.index)
+            poi_hit   = poi_mask  & (rel["distance_m"]      <= float(poi_threshold))
+            area_hit  = area_mask & (rel["centroid_dist_m"] <  float(min_dist_area))  # change to > if that's the spec
+
+            is_at_poi  = pd.Series(False, index=rel.index, dtype=bool)
+            is_at_area = pd.Series(False, index=rel.index, dtype=bool)
 
             if poi_mask.any():
-                is_at_poi[poi_mask] = rel.loc[poi_mask, "distance_m"] <= float(poi_threshold)
+                cmp = (rel.loc[poi_mask, "distance_m"] <= float(poi_threshold)).astype(bool)
+                # align on index; avoids dtype warning
+                is_at_poi.loc[cmp.index] = cmp.values
 
             if area_mask.any():
-                # your rule
-                is_at_area[area_mask] = rel.loc[area_mask, "centroid_dist_m"] < float(min_dist_area)
+                cmp = (rel.loc[area_mask, "centroid_dist_m"] < float(min_dist_area)).astype(bool)
+                is_at_area.loc[cmp.index] = cmp.values
 
-            is_at = rel[is_at_poi | is_at_area].reset_index(drop=True)
+            is_at = rel.loc[(is_at_poi | is_at_area).to_numpy()].reset_index(drop=True)
+
 
             base["relPos"] = rel
-            base["isAt"] = is_at
-            base["params"] = {"poi_threshold": float(poi_threshold), "min_dist_area": float(min_dist_area)}
+            base["isAt"]   = is_at
+            base["params"] = {
+                "poi_threshold": float(poi_threshold),
+                "min_dist_area": float(min_dist_area),
+            }
         except Exception:
             log.exception("failed to compute relPos/isAt")
             base["relPos"] = pd.DataFrame()
-            base["isAt"] = pd.DataFrame()
+            base["isAt"]   = pd.DataFrame()
         return base
+
 
 
 # ---- human-readable → int maps ----
