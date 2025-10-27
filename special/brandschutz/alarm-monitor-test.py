@@ -92,9 +92,10 @@ def collect_evac_points(robots: list[Robot]):
 def plan_length(robot: Robot, poi) -> float:
     # Prefer planned path length; fallback Euclidean
     try:
-        res = robot.plan_path(poi["name"])
-        L = float(res.get("length_m") or 0.0)
-        if L > 0: return L
+        # res = robot.plan_path(poi["name"])
+        # L = float(res.get("length_m") or 0.0)
+        # if L > 0: return L
+        pass
     except Exception:
         pass
     rx, ry = safe_get_pose_xy(robot)
@@ -114,7 +115,7 @@ def compute_best_assignment(robots: list[Robot], evac_pts: list[dict], should_st
             return {}
         # Avoid noisy logging during planning
         try:
-            st = r.get_state(min_dist_area=6)
+            st = r.get_state(min_dist_area=40)
             isAt = st.get("isAt", None)  # just access, don't log
             log(isAt)
         except Exception:
