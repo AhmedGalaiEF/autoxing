@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import sys, math, time, json, signal, threading
+import sys, math, time, json, signal, threading, re
 from datetime import datetime
 import RPi.GPIO as GPIO
-import re
 
 from api_lib import (
     Robot,
@@ -23,6 +22,8 @@ ASSIGN_REFRESH_SEC  = 10     # preplan refresh while idle
 RESEND_COOLDOWN_SEC = 60     # ONLY throttles re-cancel/re-dispatch
 
 EVAC_REGEX = r"(?i)^Evac.*"
+BRANDSCHUTZ_REGEX = r"(?i)^Brandschutz$"  # exact name match, case-insensitive
+BRANDSCHUTZ_RADIUS_M = 20.0               # << requirement
 
 GPIO.setwarnings(False)
 GPIO.setmode(GPIO.BCM)
@@ -51,6 +52,10 @@ def safe_get_pose_xy(robot: Robot):
     except Exception:
         return float("nan"), float("nan")
 
+# ---- FIXED get_state (no pandas dtype warnings) ----
+# If api_lib.Robot already defines get_state, you can monkey-patch it like this,
+# or copy these lines into your class implementation directly.
+
 def cancel_if_active(robot: Robot):
     try:
         task_obj = robot.get_task()
@@ -65,6 +70,9 @@ def cancel_if_active(robot: Robot):
         log(f"[{robot.SN}] Error canceling task: {e}")
 
 def collect_evac_points(robots: list[Robot]):
+    """
+    Global set of all Evac.* POIs across robots, with coordinates and metadata.
+    """
     seen_ids, points = set(), []
     for r in robots:
         try:
@@ -92,58 +100,136 @@ def collect_evac_points(robots: list[Robot]):
 def plan_length(robot: Robot, poi) -> float:
     # Prefer planned path length; fallback Euclidean
     try:
-        # res = robot.plan_path(poi["name"])
-        # L = float(res.get("length_m") or 0.0)
-        # if L > 0: return L
-        pass
+        res = robot.plan_path(poi["name"])
+        L = float(res.get("length_m") or 0.0)
+        if L > 0: return L
     except Exception:
         pass
     rx, ry = safe_get_pose_xy(robot)
     if not (math.isfinite(rx) and math.isfinite(ry)): return float("inf")
     return euclid((rx, ry), (poi["x"], poi["y"]))
 
-def compute_best_assignment(robots: list[Robot], evac_pts: list[dict], should_stop=lambda: False):
+def brandschutz_ok(is_at_df: pd.DataFrame) -> bool:
     """
-    Cancellable preplanning: checks should_stop() frequently so Ctrl+C/SIGTERM
-    aborts quickly even during heavy loops.
+    True if there is at least one Brandschutz *area* in isAt.
+    (isAt already applies min_dist_area threshold from get_state)
     """
-    if should_stop() or not robots or not evac_pts:
+    if not isinstance(is_at_df, pd.DataFrame) or is_at_df.empty:
+        return False
+    area_rows = is_at_df[is_at_df["kind"].astype(str).str.lower().eq("area")]
+    if area_rows.empty:
+        return False
+    name_series = area_rows["name"].astype(str)
+    return name_series.str.match(BRANDSCHUTZ_REGEX, na=False).any()
+
+def get_robot_local_evac_candidates(robot: Robot, global_evacs_by_id: dict) -> list[dict]:
+    """
+    For a single robot:
+    - require proximity to a Brandschutz area within 20m (by calling get_state with min_dist_area=20)
+    - return only Evac.* POIs present in st['isAt'] for this robot, mapped to full POI dicts from global list.
+    """
+    try:
+        st = robot.get_state(min_dist_area=BRANDSCHUTZ_RADIUS_M)
+        is_at = st.get("isAt")
+        if not brandschutz_ok(is_at):
+            log(f"[{robot.SN}] Not within {BRANDSCHUTZ_RADIUS_M:.0f} m of a Brandschutz area → skip.")
+            return []
+        # POIs in isAt that match EVAC_REGEX
+        poi_rows = is_at[is_at["kind"].astype(str).str.lower().eq("poi")]
+        if poi_rows.empty:
+            log(f"[{robot.SN}] No Evac.* POIs in isAt.")
+            return []
+        poi_rows = poi_rows[poi_rows["name"].astype(str).str.match(EVAC_REGEX, na=False)]
+        if poi_rows.empty:
+            log(f"[{robot.SN}] No Evac.* POIs in isAt after filter.")
+            return []
+        # Map to global POI dicts (ensure we use consistent x/y/yaw, areaId, etc.)
+        out = []
+        for _, row in poi_rows.iterrows():
+            pid = str(row.get("id"))
+            if not pid:
+                continue
+            g = global_evacs_by_id.get(pid)
+            if g:
+                out.append(g)
+        if not out:
+            log(f"[{robot.SN}] Evac.* POIs in isAt but no global match by id (ids may differ).")
+        return out
+    except Exception as e:
+        log(f"[{robot.SN}] get_state/isAt parse failed: {e}")
+        return []
+
+def compute_best_assignment(robots: list[Robot], global_evac_pts: list[dict], should_stop=lambda: False):
+    """
+    Build per-robot candidate POIs from isAt (only if near Brandschutz within 20m),
+    then greedy assign shortest planned path, ensuring unique POIs.
+    """
+    if should_stop():
         return {}
-    pairs = []
+    if not robots or not global_evac_pts:
+        return {}
+
+    evacs_by_id = {p["id"]: p for p in global_evac_pts}
+
+    # Gather candidates per robot
+    candidates = {}
     for r in robots:
         if should_stop():
             return {}
-        # Avoid noisy logging during planning
-        try:
-            st = r.get_state(min_dist_area=40)
-            isAt = st.get("isAt", None)  # just access, don't log
-            log(isAt)
-        except Exception:
+        cands = get_robot_local_evac_candidates(r, evacs_by_id)
+        if cands:
+            candidates[r.SN] = cands
+        else:
+            # Explicit: skip this robot
             pass
-        for p in evac_pts:
+
+    if not candidates:
+        log("No eligible robots (within Brandschutz radius) with local Evac.* candidates.")
+        return {}
+
+    # Build all (length, rid, pid) pairs only from allowed candidates
+    pairs = []
+    for r in robots:
+        rid = r.SN
+        if rid not in candidates:
+            continue
+        for p in candidates[rid]:
             if should_stop():
                 return {}
             L = plan_length(r, p)
-            pairs.append((L, r.SN, p["id"]))
+            pairs.append((L, rid, p["id"]))
+
+    if not pairs:
+        log("No feasible (robot, Evac POI) pairs.")
+        return {}
+
     pairs.sort(key=lambda t: t[0])
 
     assigned, used_pts = {}, set()
-    by_id = {p["id"]: p for p in evac_pts}
     for L, rid, pid in pairs:
         if should_stop():
             return assigned
         try:
-            if rid in assigned or pid in used_pts: continue
-            if not math.isfinite(L): continue
-            assigned[rid] = by_id[pid] | {"planned_length_m": L}
+            if rid in assigned or pid in used_pts:
+                continue
+            if not math.isfinite(L):
+                continue
+            assigned[rid] = evacs_by_id[pid] | {"planned_length_m": L}
             used_pts.add(pid)
-            if len(assigned) >= len(robots): break
+            if len(assigned) >= len(candidates):
+                break
         except KeyboardInterrupt:
-            # Bubble up cleanly (outer try/except will handle)
             raise
         except Exception:
-            # Skip problematic pair
             continue
+
+    # Log summary
+    if assigned:
+        brief = ", ".join(f"{rid}→{v['name']} (~{v['planned_length_m']:.1f} m)"
+                          for rid, v in assigned.items())
+        log(f"Planned (Brandschutz≤{BRANDSCHUTZ_RADIUS_M:.0f} m): {brief}")
+    else:
+        log("No assignments found under Brandschutz proximity rule.")
     return assigned
 
 def dispatch_to_cached_targets(robots: list[Robot], cache: dict[str, dict]):
@@ -175,7 +261,7 @@ def dispatch_to_cached_targets(robots: list[Robot], cache: dict[str, dict]):
             #     speed=1.0, detourRadius=1.0, ignorePublicSite=True,
             # )
             # robot.go_to_poi(poi['name'])
-            resp = None  # keep defined even if create_task is commented
+            resp = None
             tid = (resp or {}).get("taskId")
             log(f"[{r.SN}] Task created: {tid}")
         except KeyboardInterrupt:
@@ -226,17 +312,13 @@ class EvacPlanner:
             return
         if not self._robots or not self._evac_pts:
             return
-        log("Preplanning optimal assignments…")
+        log(f"Preplanning optimal assignments (Brandschutz≤{BRANDSCHUTZ_RADIUS_M:.0f} m)…")
         new_map = compute_best_assignment(self._robots, self._evac_pts, self.should_stop)
         with self._lock:
             self._cached_targets = new_map
             self._last_assign_ts = now
-        if new_map:
-            brief = ", ".join(f"{rid}→{v['name']} (~{v['planned_length_m']:.1f} m)"
-                              for rid, v in new_map.items())
-            log(f"Planned: {brief}")
-        else:
-            log("No feasible assignments.")
+        if not new_map:
+            log("No feasible assignments under current constraints.")
 
     def run(self):
         self.refresh_inputs()
@@ -289,7 +371,6 @@ class EvacPlanner:
 
         except KeyboardInterrupt:
             log("Loop stopped by user (Ctrl+C).")
-            # make sure other loops see the stop flag quickly
             self.stop()
         finally:
             GPIO.cleanup()
@@ -307,7 +388,6 @@ def main():
     except KeyboardInterrupt:
         log("Interrupted by user.")
     finally:
-        # Extra safety; run() already cleans up, but double-cleaning is harmless.
         try:
             GPIO.cleanup()
         except Exception:
