@@ -4,6 +4,7 @@
 import sys, math, time, json, signal, threading
 from datetime import datetime
 import RPi.GPIO as GPIO
+import re
 
 from api_lib import (
     Robot,
@@ -52,7 +53,6 @@ def safe_get_pose_xy(robot: Robot):
 
 def cancel_if_active(robot: Robot):
     try:
-        # st = robot.get_state()
         task_obj = robot.get_task()
         if isinstance(task_obj, dict) and task_obj.get("taskId"):
             tid = task_obj["taskId"]
@@ -101,13 +101,26 @@ def plan_length(robot: Robot, poi) -> float:
     if not (math.isfinite(rx) and math.isfinite(ry)): return float("inf")
     return euclid((rx, ry), (poi["x"], poi["y"]))
 
-def compute_best_assignment(robots: list[Robot], evac_pts: list[dict]):
-    if not robots or not evac_pts: return {}
+def compute_best_assignment(robots: list[Robot], evac_pts: list[dict], should_stop=lambda: False):
+    """
+    Cancellable preplanning: checks should_stop() frequently so Ctrl+C/SIGTERM
+    aborts quickly even during heavy loops.
+    """
+    if should_stop() or not robots or not evac_pts:
+        return {}
     pairs = []
     for r in robots:
-        state = r.get_state()
-        log(state["isAt"])
+        if should_stop():
+            return {}
+        # Avoid noisy logging during planning
+        try:
+            st = r.get_state()
+            _ = st.get("isAt", None)  # just access, don't log
+        except Exception:
+            pass
         for p in evac_pts:
+            if should_stop():
+                return {}
             L = plan_length(r, p)
             pairs.append((L, r.SN, p["id"]))
     pairs.sort(key=lambda t: t[0])
@@ -115,6 +128,8 @@ def compute_best_assignment(robots: list[Robot], evac_pts: list[dict]):
     assigned, used_pts = {}, set()
     by_id = {p["id"]: p for p in evac_pts}
     for L, rid, pid in pairs:
+        if should_stop():
+            return assigned
         try:
             if rid in assigned or pid in used_pts: continue
             if not math.isfinite(L): continue
@@ -122,8 +137,11 @@ def compute_best_assignment(robots: list[Robot], evac_pts: list[dict]):
             used_pts.add(pid)
             if len(assigned) >= len(robots): break
         except KeyboardInterrupt:
-            break
-            print("Assignment interrupted by User")
+            # Bubble up cleanly (outer try/except will handle)
+            raise
+        except Exception:
+            # Skip problematic pair
+            continue
     return assigned
 
 def dispatch_to_cached_targets(robots: list[Robot], cache: dict[str, dict]):
@@ -155,8 +173,11 @@ def dispatch_to_cached_targets(robots: list[Robot], cache: dict[str, dict]):
             #     speed=1.0, detourRadius=1.0, ignorePublicSite=True,
             # )
             # robot.go_to_poi(poi['name'])
+            resp = None  # keep defined even if create_task is commented
             tid = (resp or {}).get("taskId")
             log(f"[{r.SN}] Task created: {tid}")
+        except KeyboardInterrupt:
+            raise
         except Exception as e:
             log(f"[{r.SN}] Task creation failed: {e}")
 
@@ -171,7 +192,12 @@ class EvacPlanner:
         self._last_dispatch_ts = 0.0  # gates re-send while alarm stays active
 
     def stop(self):
-        with self._lock: self._stop = True
+        with self._lock:
+            self._stop = True
+
+    def should_stop(self):
+        with self._lock:
+            return self._stop
 
     def load_robots(self):
         df = get_business_robots(BUSINESS_NAME_PREFIX)
@@ -199,7 +225,7 @@ class EvacPlanner:
         if not self._robots or not self._evac_pts:
             return
         log("Preplanning optimal assignments…")
-        new_map = compute_best_assignment(self._robots, self._evac_pts)
+        new_map = compute_best_assignment(self._robots, self._evac_pts, self.should_stop)
         with self._lock:
             self._cached_targets = new_map
             self._last_assign_ts = now
@@ -220,59 +246,70 @@ class EvacPlanner:
 
         try:
             while True:
-                try:
-                    with self._lock:
-                        if self._stop: break
+                if self.should_stop():
+                    break
 
-                    alarm = is_alarm_active()
-                    now = time.time()
+                alarm = is_alarm_active()
+                now = time.time()
 
-                    if alarm:
-                        # rising edge → immediate dispatch
-                        if not last_alarm:
-                            log("ALARM detected → dispatch now (first wave)")
-                            if not self._robots:
-                                self.refresh_inputs()
-                            if not self._cached_targets:
-                                self.recompute_assignments_if_due(force=True)
-                            dispatch_to_cached_targets(self._robots, self._cached_targets)
-                            self._last_dispatch_ts = now
+                if alarm:
+                    # rising edge → immediate dispatch
+                    if not last_alarm:
+                        log("ALARM detected → dispatch now (first wave)")
+                        if not self._robots:
+                            self.refresh_inputs()
+                        if not self._cached_targets:
+                            self.recompute_assignments_if_due(force=True)
+                        dispatch_to_cached_targets(self._robots, self._cached_targets)
+                        self._last_dispatch_ts = now
 
-                        # while alarm remains active → re-dispatch only on cooldown
-                        elif (now - self._last_dispatch_ts) >= RESEND_COOLDOWN_SEC:
-                            log("ALARM still active → re-dispatch after cooldown")
-                            # optional: refresh targets before re-dispatch
-                            if not self._cached_targets:
-                                self.refresh_inputs()
-                                self.recompute_assignments_if_due(force=True)
-                            dispatch_to_cached_targets(self._robots, self._cached_targets)
-                            self._last_dispatch_ts = now
-
-                    else:
-                        # alarm cleared → reset resend gate and keep planning in background
-                        if last_alarm:
-                            log("Alarm cleared → reset resend gate")
-                        # light background maintenance
-                        if (now - self._last_assign_ts) >= ASSIGN_REFRESH_SEC:
+                    # while alarm remains active → re-dispatch only on cooldown
+                    elif (now - self._last_dispatch_ts) >= RESEND_COOLDOWN_SEC:
+                        log("ALARM still active → re-dispatch after cooldown")
+                        # optional: refresh targets before re-dispatch
+                        if not self._cached_targets:
                             self.refresh_inputs()
                             self.recompute_assignments_if_due(force=True)
+                        dispatch_to_cached_targets(self._robots, self._cached_targets)
+                        self._last_dispatch_ts = now
 
-                    last_alarm = alarm
-                    time.sleep(POLL_INTERVAL_SEC)
-                except KeyboardInterrupt:
-                    break
-                    log("Loop Stopped by User")
+                else:
+                    # alarm cleared → reset resend gate and keep planning in background
+                    if last_alarm:
+                        log("Alarm cleared → reset resend gate")
+                    # light background maintenance
+                    if (now - self._last_assign_ts) >= ASSIGN_REFRESH_SEC:
+                        self.refresh_inputs()
+                        self.recompute_assignments_if_due(force=True)
+
+                last_alarm = alarm
+                time.sleep(POLL_INTERVAL_SEC)
+
+        except KeyboardInterrupt:
+            log("Loop stopped by user (Ctrl+C).")
+            # make sure other loops see the stop flag quickly
+            self.stop()
         finally:
             GPIO.cleanup()
 
 # ---- entrypoint ----
 def main():
     planner = EvacPlanner()
-    def _stop(*_): planner.stop()
-    signal.signal(signal.SIGINT, _stop)
-    signal.signal(signal.SIGTERM, _stop)
-    planner.run()
+
+    # Let Ctrl+C (SIGINT) and SIGTERM raise KeyboardInterrupt normally.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+
+    try:
+        planner.run()
+    except KeyboardInterrupt:
+        log("Interrupted by user.")
+    finally:
+        # Extra safety; run() already cleans up, but double-cleaning is harmless.
+        try:
+            GPIO.cleanup()
+        except Exception:
+            pass
 
 if __name__ == "__main__":
-    import signal
     main()
