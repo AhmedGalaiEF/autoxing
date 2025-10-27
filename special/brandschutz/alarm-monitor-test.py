@@ -254,6 +254,8 @@ class EvacPlanner:
 
                 last_alarm = alarm
                 time.sleep(POLL_INTERVAL_SEC)
+        except KeyboardInterrupt:
+            print("Loop Stopped by User")
         finally:
             GPIO.cleanup()
 
