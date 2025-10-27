@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import sys, math, time, json, signal, threading
+import sys, math, time, json, signal, threading, re
 from datetime import datetime
+from typing import Optional, List, Dict, Callable
 import RPi.GPIO as GPIO
 
 from api_lib import (
@@ -15,13 +16,17 @@ from api_lib import (
 
 BUSINESS_NAME_PREFIX = "Assa Abloy"
 ALARM_GPIO = 17
+HEARTBEAT_SEC = 5
 
 # --- timings ---
-POLL_INTERVAL_SEC   = 0.2    # fast alarm polling
-ASSIGN_REFRESH_SEC  = 10     # preplan refresh while idle
-RESEND_COOLDOWN_SEC = 60     # ONLY throttles re-cancel/re-dispatch
+POLL_INTERVAL_SEC    = 0.2     # fast alarm polling
+ASSIGN_REFRESH_SEC   = 120     # preplan refresh cadence (idle + alarm, but async)
+RESEND_COOLDOWN_SEC  = 60      # ONLY throttles re-cancel/re-dispatch
+VERBOSE_REPLAN_LOGS  = True    # set False if too chatty
 
-EVAC_REGEX = r"(?i)^Evac.*"
+EVAC_REGEX            = r"(?i)^Evac.*"
+BRANDSCHUTZ_REGEX     = r"(?i)^Brandschutz$"  # exact name match, case-insensitive
+BRANDSCHUTZ_RADIUS_M  = 20.0                  # proximity requirement
 
 GPIO.setwarnings(False)
 GPIO.setmode(GPIO.BCM)
@@ -32,9 +37,11 @@ def is_alarm_active() -> bool:
     # return GPIO.input(ALARM_GPIO) == GPIO.LOW
     return True
 
-def log(msg: str): print(f"{datetime.now().isoformat()} {msg}", flush=True)
+def log(msg: str) -> None:
+    print(f"{datetime.now().isoformat()} {msg}", flush=True)
 
-def euclid(a, b): return math.hypot(a[0] - b[0], a[1] - b[1])
+def euclid(a, b) -> float:
+    return math.hypot(a[0] - b[0], a[1] - b[1])
 
 def safe_get_pose_xy(robot: Robot):
     try:
@@ -52,7 +59,6 @@ def safe_get_pose_xy(robot: Robot):
 
 def cancel_if_active(robot: Robot):
     try:
-        # st = robot.get_state()
         task_obj = robot.get_task()
         if isinstance(task_obj, dict) and task_obj.get("taskId"):
             tid = task_obj["taskId"]
@@ -64,7 +70,8 @@ def cancel_if_active(robot: Robot):
     except Exception as e:
         log(f"[{robot.SN}] Error canceling task: {e}")
 
-def collect_evac_points(robots: list[Robot]):
+def collect_evac_points(robots: List[Robot]) -> List[dict]:
+    """Global set of all Evac.* POIs across robots, with coordinates and metadata."""
     seen_ids, points = set(), []
     for r in robots:
         try:
@@ -89,46 +96,153 @@ def collect_evac_points(robots: list[Robot]):
             log(f"[{r.SN}] POI fetch failed: {e}")
     return points
 
-def plan_length(robot: Robot, poi) -> float:
-    # Prefer planned path length; fallback Euclidean
+def plan_length(robot: Robot, poi: dict) -> float:
+    """Prefer planned path length; fallback to Euclidean."""
     try:
         res = robot.plan_path(poi["name"])
         L = float(res.get("length_m") or 0.0)
-        if L > 0: return L
+        if L > 0:
+            return L
     except Exception:
         pass
     rx, ry = safe_get_pose_xy(robot)
-    if not (math.isfinite(rx) and math.isfinite(ry)): return float("inf")
+    if not (math.isfinite(rx) and math.isfinite(ry)):
+        return float("inf")
     return euclid((rx, ry), (poi["x"], poi["y"]))
 
-def compute_best_assignment(robots: list[Robot], evac_pts: list[dict]):
-    if not robots or not evac_pts: return {}
+def brandschutz_ok(is_at_df: pd.DataFrame) -> bool:
+    """True if there is at least one Brandschutz *area* in isAt (min_dist enforced by get_state)."""
+    if not isinstance(is_at_df, pd.DataFrame) or is_at_df.empty:
+        return False
+    area_rows = is_at_df[is_at_df["kind"].astype(str).str.lower().eq("area")]
+    if area_rows.empty:
+        return False
+    name_series = area_rows["name"].astype(str)
+    return name_series.str.match(BRANDSCHUTZ_REGEX, na=False).any()
+
+def get_robot_local_evac_candidates(robot: Robot, global_evacs_by_id: Dict[str, dict]) -> List[dict]:
+    """
+    For a single robot:
+      - require proximity to a Brandschutz area within 20m (get_state with min_dist_area=20)
+      - return only Evac.* POIs present in st['isAt'], mapped to global POI dicts.
+    """
+    try:
+        if VERBOSE_REPLAN_LOGS:
+            log(f"[{robot.SN}] querying state (min_dist_area={BRANDSCHUTZ_RADIUS_M:.0f}m)…")
+        st = robot.get_state(min_dist_area=BRANDSCHUTZ_RADIUS_M)
+        is_at = st.get("isAt")
+        if not brandschutz_ok(is_at):
+            log(f"[{robot.SN}] Not within {BRANDSCHUTZ_RADIUS_M:.0f} m of a Brandschutz area → skip.")
+            return []
+        poi_rows = is_at[is_at["kind"].astype(str).str.lower().eq("poi")]
+        if poi_rows.empty:
+            log(f"[{robot.SN}] No Evac.* POIs in isAt.")
+            return []
+        poi_rows = poi_rows[poi_rows["name"].astype(str).str.match(EVAC_REGEX, na=False)]
+        if poi_rows.empty:
+            log(f"[{robot.SN}] No Evac.* POIs in isAt after filter.")
+            return []
+        out = []
+        for _, row in poi_rows.iterrows():
+            pid = str(row.get("id"))
+            if not pid:
+                continue
+            g = global_evacs_by_id.get(pid)
+            if g:
+                out.append(g)
+        if not out:
+            log(f"[{robot.SN}] Evac.* POIs in isAt but no global match by id (ids may differ).")
+        return out
+    except Exception as e:
+        log(f"[{robot.SN}] get_state/isAt parse failed: {e}")
+        return []
+
+def compute_best_assignment(robots: List[Robot], global_evac_pts: List[dict], should_stop: Callable[[], bool] = lambda: False) -> Dict[str, dict]:
+    """
+    Per-robot candidates from isAt (only if near Brandschutz<=20m),
+    greedy assign shortest path, enforce unique POIs.
+    """
+    if should_stop():
+        return {}
+    if not robots or not global_evac_pts:
+        return {}
+
+    evacs_by_id = {p["id"]: p for p in global_evac_pts}
+
+    # Gather candidates per robot
+    candidates: Dict[str, List[dict]] = {}
+    for r in robots:
+        if should_stop():
+            return {}
+        cands = get_robot_local_evac_candidates(r, evacs_by_id)
+        if cands:
+            candidates[r.SN] = cands
+
+    if not candidates:
+        log("No eligible robots (within Brandschutz radius) with local Evac.* candidates.")
+        return {}
+
+    # Build (length, rid, pid)
     pairs = []
     for r in robots:
-        for p in evac_pts:
+        rid = r.SN
+        if rid not in candidates:
+            continue
+        for p in candidates[rid]:
+            if should_stop():
+                return {}
             L = plan_length(r, p)
-            pairs.append((L, r.SN, p["id"]))
+            pairs.append((L, rid, p["id"]))
+
+    if not pairs:
+        log("No feasible (robot, Evac POI) pairs.")
+        return {}
+
     pairs.sort(key=lambda t: t[0])
 
     assigned, used_pts = {}, set()
-    by_id = {p["id"]: p for p in evac_pts}
     for L, rid, pid in pairs:
-        if rid in assigned or pid in used_pts: continue
-        if not math.isfinite(L): continue
-        assigned[rid] = by_id[pid] | {"planned_length_m": L}
-        used_pts.add(pid)
-        if len(assigned) >= len(robots): break
+        if should_stop():
+            return assigned
+        try:
+            if rid in assigned or pid in used_pts:
+                continue
+            if not math.isfinite(L):
+                continue
+            assigned[rid] = evacs_by_id[pid] | {"planned_length_m": L}
+            used_pts.add(pid)
+            if len(assigned) >= len(candidates):
+                break
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            continue
+
+    if assigned:
+        brief = ", ".join(f"{rid}→{v['name']} (~{v['planned_length_m']:.1f} m)"
+                          for rid, v in assigned.items())
+        log(f"Planned (Brandschutz≤{BRANDSCHUTZ_RADIUS_M:.0f} m): {brief}")
+    else:
+        log("No assignments found under Brandschutz proximity rule.")
     return assigned
 
-def dispatch_to_cached_targets(robots: list[Robot], cache: dict[str, dict]):
+def dispatch_to_cached_targets(robots: List[Robot], cache: Dict[str, dict]) -> None:
+    started = time.time()
+    log(f"[dispatch] starting wave: robots={len(robots)} cached_targets={len(cache)}")
     used = set()
+    issued = 0
+    skipped_no_target = 0
+    skipped_dupe = 0
+
     for r in robots:
         poi = cache.get(r.SN)
         if not poi:
             log(f"[{r.SN}] No cached target. Skipping.")
+            skipped_no_target += 1
             continue
         if poi["id"] in used:
             log(f"[{r.SN}] Target already used this wave. Skipping.")
+            skipped_dupe += 1
             continue
         used.add(poi["id"])
         cancel_if_active(r)
@@ -148,32 +262,53 @@ def dispatch_to_cached_targets(robots: list[Robot], cache: dict[str, dict]):
             #     runNum=1, taskType=4, routeMode=2, runMode=1,
             #     speed=1.0, detourRadius=1.0, ignorePublicSite=True,
             # )
-            robot.go_to_poi(poi['name'])
+            r.go_to_poi(poi['name'])
+            resp = None
             tid = (resp or {}).get("taskId")
             log(f"[{r.SN}] Task created: {tid}")
+            issued += 1
+        except KeyboardInterrupt:
+            raise
         except Exception as e:
             log(f"[{r.SN}] Task creation failed: {e}")
+
+    dur = time.time() - started
+    log(f"[dispatch] done: issued={issued} skipped_no_target={skipped_no_target} "
+        f"skipped_dupe={skipped_dupe} duration={dur:.2f}s")
 
 class EvacPlanner:
     def __init__(self):
         self._stop = False
         self._lock = threading.Lock()
-        self._cached_targets: dict[str, dict] = {}
-        self._robots: list[Robot] = []
-        self._evac_pts: list[dict] = []
+        self._cached_targets: Dict[str, dict] = {}
+        self._robots: List[Robot] = []
+        self._evac_pts: List[dict] = []
         self._last_assign_ts = 0.0
-        self._last_dispatch_ts = 0.0  # gates re-send while alarm stays active
+        self._last_dispatch_ts = 0.0
+        self._last_heartbeat = 0.0
+        self._replan_thread: Optional[threading.Thread] = None
 
     def stop(self):
-        with self._lock: self._stop = True
+        with self._lock:
+            self._stop = True
 
-    def load_robots(self):
+    def should_stop(self) -> bool:
+        with self._lock:
+            return self._stop
+
+    def _replan_running(self) -> bool:
+        t = self._replan_thread
+        return bool(t and t.is_alive())
+
+    def load_robots(self) -> List[Robot]:
         df = get_business_robots(BUSINESS_NAME_PREFIX)
         if isinstance(df, str) or df is None or df.empty:
-            log(f"No robots for '{BUSINESS_NAME_PREFIX}'."); return []
+            log(f"No robots for '{BUSINESS_NAME_PREFIX}'.")
+            return []
         online = df[df["isOnLine"] == True]
         if online.empty:
-            log(f"No online robots for '{BUSINESS_NAME_PREFIX}'."); return []
+            log(f"No online robots for '{BUSINESS_NAME_PREFIX}'.")
+            return []
         robots = [Robot(rid) for rid in online["robotId"]]
         log(f"Tracking robots: {', '.join(r.SN for r in robots)}")
         return robots
@@ -186,26 +321,66 @@ class EvacPlanner:
         else:
             log("No Evac.* POIs found.")
 
-    def recompute_assignments_if_due(self, force=False):
+    def recompute_assignments_if_due(self, force: bool = False):
         now = time.time()
-        if not force and (now - self._last_assign_ts) < ASSIGN_REFRESH_SEC:
+        due = (now - self._last_assign_ts) >= ASSIGN_REFRESH_SEC
+        if not force and not due:
+            if VERBOSE_REPLAN_LOGS:
+                remaining = ASSIGN_REFRESH_SEC - (now - self._last_assign_ts)
+                log(f"[replan] skipped (cooldown {remaining:.1f}s)")
             return
         if not self._robots or not self._evac_pts:
+            if VERBOSE_REPLAN_LOGS:
+                log("[replan] skipped (no robots or no Evac.* POIs)")
             return
-        log("Preplanning optimal assignments…")
-        new_map = compute_best_assignment(self._robots, self._evac_pts)
+
+        log(f"Preplanning optimal assignments (Brandschutz≤{BRANDSCHUTZ_RADIUS_M:.0f} m)…")
+        new_map = compute_best_assignment(self._robots, self._evac_pts, self.should_stop)
+
         with self._lock:
+            old = self._cached_targets
             self._cached_targets = new_map
             self._last_assign_ts = now
-        if new_map:
+
+        if not new_map:
+            log("[replan] no feasible assignments.")
+        else:
             brief = ", ".join(f"{rid}→{v['name']} (~{v['planned_length_m']:.1f} m)"
                               for rid, v in new_map.items())
-            log(f"Planned: {brief}")
-        else:
-            log("No feasible assignments.")
+            if old != new_map:
+                log(f"[replan] updated: {brief}")
+            elif VERBOSE_REPLAN_LOGS:
+                log(f"[replan] unchanged: {brief}")
+
+    def kick_replan_async(self, force: bool = False):
+        """Start a background replan if cooldown allows and none running."""
+        now = time.time()
+        if not force and (now - self._last_assign_ts) < ASSIGN_REFRESH_SEC:
+            if VERBOSE_REPLAN_LOGS:
+                remaining = ASSIGN_REFRESH_SEC - (now - self._last_assign_ts)
+                log(f"[replan] skipped (cooldown {remaining:.1f}s)")
+            return
+        if self._replan_running():
+            if VERBOSE_REPLAN_LOGS:
+                log("[replan] already running")
+            return
+
+        def _worker():
+            try:
+                self.recompute_assignments_if_due(force=True)
+            except KeyboardInterrupt:
+                pass
+            except Exception as e:
+                log(f"[replan] background failed: {e}")
+
+        self._replan_thread = threading.Thread(target=_worker, daemon=True)
+        self._replan_thread.start()
+        if VERBOSE_REPLAN_LOGS:
+            log("[replan] started in background")
 
     def run(self):
         self.refresh_inputs()
+        # Initial plan (blocking) so we have something to dispatch
         self.recompute_assignments_if_due(force=True)
 
         last_alarm = False
@@ -214,55 +389,78 @@ class EvacPlanner:
 
         try:
             while True:
-                with self._lock:
-                    if self._stop: break
+                if self.should_stop():
+                    break
 
                 alarm = is_alarm_active()
                 now = time.time()
 
                 if alarm:
-                    # rising edge → immediate dispatch
+                    # First, DISPATCH on schedule (never block on planning here)
                     if not last_alarm:
                         log("ALARM detected → dispatch now (first wave)")
                         if not self._robots:
                             self.refresh_inputs()
                         if not self._cached_targets:
+                            # only block if we literally have nothing to send
                             self.recompute_assignments_if_due(force=True)
                         dispatch_to_cached_targets(self._robots, self._cached_targets)
                         self._last_dispatch_ts = now
 
-                    # while alarm remains active → re-dispatch only on cooldown
                     elif (now - self._last_dispatch_ts) >= RESEND_COOLDOWN_SEC:
                         log("ALARM still active → re-dispatch after cooldown")
-                        # optional: refresh targets before re-dispatch
-                        if not self._cached_targets:
-                            self.refresh_inputs()
-                            self.recompute_assignments_if_due(force=True)
                         dispatch_to_cached_targets(self._robots, self._cached_targets)
                         self._last_dispatch_ts = now
 
-                else:
-                    # alarm cleared → reset resend gate and keep planning in background
-                    if last_alarm:
-                        log("Alarm cleared → reset resend gate")
-                    # light background maintenance
+                    # Keep assignments fresh DURING alarm, but async
                     if (now - self._last_assign_ts) >= ASSIGN_REFRESH_SEC:
                         self.refresh_inputs()
-                        self.recompute_assignments_if_due(force=True)
+                        self.kick_replan_async(force=True)
+                    else:
+                        # lightweight nudge (no-op if cooldown)
+                        self.kick_replan_async(force=False)
+
+                else:
+                    # Idle: refresh and replan async on cadence
+                    if (now - self._last_assign_ts) >= ASSIGN_REFRESH_SEC:
+                        self.refresh_inputs()
+                        self.kick_replan_async(force=True)
+                    else:
+                        self.kick_replan_async(force=False)
 
                 last_alarm = alarm
                 time.sleep(POLL_INTERVAL_SEC)
+
+                # Heartbeat
+                if now - self._last_heartbeat >= HEARTBEAT_SEC:
+                    log(f"[hb] alarm={alarm} cached_targets={len(self._cached_targets)} "
+                        f"last_replan={int(now - self._last_assign_ts)}s ago "
+                        f"replan_running={self._replan_running()}")
+                    self._last_heartbeat = now
+
+        except KeyboardInterrupt:
+            log("Loop stopped by user (Ctrl+C).")
+            self.stop()
         finally:
             GPIO.cleanup()
 
 # ---- entrypoint ----
 def main():
     planner = EvacPlanner()
-    def _stop(*_): planner.stop()
-    signal.signal(signal.SIGINT, _stop)
-    signal.signal(signal.SIGTERM, _stop)
-    planner.run()
+
+    # Let Ctrl+C (SIGINT) and SIGTERM raise KeyboardInterrupt normally.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+
+    try:
+        planner.run()
+    except KeyboardInterrupt:
+        log("Interrupted by user.")
+    finally:
+        try:
+            GPIO.cleanup()
+        except Exception:
+            pass
 
 if __name__ == "__main__":
-    import signal
     main()
