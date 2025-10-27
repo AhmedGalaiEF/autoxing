@@ -114,8 +114,9 @@ def compute_best_assignment(robots: list[Robot], evac_pts: list[dict], should_st
             return {}
         # Avoid noisy logging during planning
         try:
-            st = r.get_state()
-            _ = st.get("isAt", None)  # just access, don't log
+            st = r.get_state(min_dist_area=6)
+            isAt = st.get("isAt", None)  # just access, don't log
+            log(isAt)
         except Exception:
             pass
         for p in evac_pts:
@@ -147,8 +148,6 @@ def compute_best_assignment(robots: list[Robot], evac_pts: list[dict], should_st
 def dispatch_to_cached_targets(robots: list[Robot], cache: dict[str, dict]):
     used = set()
     for r in robots:
-        state = r.get_state(min_dist_area=6)
-        log(state["isAt"])
         poi = cache.get(r.SN)
         if not poi:
             log(f"[{r.SN}] No cached target. Skipping.")
