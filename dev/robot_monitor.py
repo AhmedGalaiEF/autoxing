@@ -11,7 +11,7 @@ from PyQt5.QtGui import QPixmap, QImage
 
 # Add api_lib to path
 sys.path.append(os.path.join(os.getcwd(),"lib"))
-from api_lib import Robot, get_robots, render_full_map
+from api_lib_v2 import Robot, get_robots, render_full_map, render_cost_map, world_to_pixel
 
 class Worker(QObject):
     """
@@ -20,7 +20,8 @@ class Worker(QObject):
     finished = pyqtSignal()
     error = pyqtSignal(str)
     robot_data_updated = pyqtSignal(dict)
-    map_updated = pyqtSignal(str)
+    map_updated = pyqtSignal(bytes)
+    cost_map_updated = pyqtSignal(bytes)
     pois_updated = pyqtSignal(object)
     path_planned = pyqtSignal(dict)
 
@@ -37,13 +38,21 @@ class Worker(QObject):
         except Exception as e:
             self.error.emit(f"Failed to refresh robot data: {e}")
 
-    def update_map(self, temp_map_path):
+    def update_map(self):
         try:
-            map_file = render_full_map(self.robot.SN, out_png=str(temp_map_path))
-            self.map_updated.emit(str(map_file))
+            map_data = render_full_map(self.robot.SN)
+            self.map_updated.emit(map_data)
             self.finished.emit()
         except Exception as e:
             self.error.emit(f"Failed to update map: {e}")
+
+    def update_cost_map(self):
+        try:
+            cost_map_data = render_cost_map(self.robot.get_env())
+            self.cost_map_updated.emit(cost_map_data)
+            self.finished.emit()
+        except Exception as e:
+            self.error.emit(f"Failed to update cost map: {e}")
 
     def update_pois(self):
         try:
@@ -53,9 +62,9 @@ class Worker(QObject):
         except Exception as e:
             self.error.emit(f"Failed to load POIs: {e}")
     
-    def plan_path(self, poi_name, temp_map_path):
+    def plan_path(self, poi_name):
         try:
-            result = self.robot.plan_path(poi_name, out_png=str(temp_map_path))
+            result = self.robot.plan_path(poi_name)
             self.path_planned.emit(result)
             self.finished.emit()
         except Exception as e:
@@ -192,7 +201,7 @@ class RobotMonitorApp(QMainWindow):
         main_layout.addWidget(left_panel)
 
         # Right panel - Map view with tabs
-        right_panel = QTabWidget()
+        self.map_tabs = QTabWidget()
 
         # Map tab
         map_widget = QWidget()
@@ -205,11 +214,6 @@ class RobotMonitorApp(QMainWindow):
         self.show_overlays_cb.stateChanged.connect(self.update_map)
         map_ctrl_layout.addWidget(self.show_overlays_cb)
 
-        self.show_robot_cb = QCheckBox("Show Robot")
-        self.show_robot_cb.setChecked(True)
-        self.show_robot_cb.stateChanged.connect(self.update_map)
-        map_ctrl_layout.addWidget(self.show_robot_cb)
-
         self.update_map_btn = QPushButton("Update Map")
         self.update_map_btn.clicked.connect(self.update_map)
         map_ctrl_layout.addWidget(self.update_map_btn)
@@ -217,15 +221,28 @@ class RobotMonitorApp(QMainWindow):
         map_layout.addLayout(map_ctrl_layout)
 
         # Map display (scrollable)
-        scroll = QScrollArea()
+        self.map_scroll_area = QScrollArea()
         self.map_label = QLabel()
         self.map_label.setStyleSheet("background-color: #1a1a1a;")
         self.map_label.setScaledContents(False)
-        scroll.setWidget(self.map_label)
-        scroll.setWidgetResizable(True)
-        map_layout.addWidget(scroll)
+        self.map_scroll_area.setWidget(self.map_label)
+        self.map_scroll_area.setWidgetResizable(True)
+        map_layout.addWidget(self.map_scroll_area)
 
-        right_panel.addTab(map_widget, "Live Map")
+        self.map_tabs.addTab(map_widget, "Live Map")
+
+        # Cost map tab
+        cost_map_widget = QWidget()
+        cost_map_layout = QVBoxLayout(cost_map_widget)
+        self.cost_map_scroll_area = QScrollArea()
+        self.cost_map_label = QLabel()
+        self.cost_map_label.setStyleSheet("background-color: #1a1a1a;")
+        self.cost_map_label.setScaledContents(False)
+        self.cost_map_scroll_area.setWidget(self.cost_map_label)
+        self.cost_map_scroll_area.setWidgetResizable(True)
+        cost_map_layout.addWidget(self.cost_map_scroll_area)
+        self.map_tabs.addTab(cost_map_widget, "Cost Map")
+
 
         # POI table tab
         poi_widget = QWidget()
@@ -233,17 +250,11 @@ class RobotMonitorApp(QMainWindow):
         self.poi_table = QTableView()
         self.poi_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         poi_layout.addWidget(self.poi_table)
-        right_panel.addTab(poi_widget, "POIs")
+        self.map_tabs.addTab(poi_widget, "POIs")
 
-        # Areas table tab
-        areas_widget = QWidget()
-        areas_layout = QVBoxLayout(areas_widget)
-        self.areas_table = QTableView()
-        self.areas_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        areas_layout.addWidget(self.areas_table)
-        right_panel.addTab(areas_widget, "Areas")
 
-        main_layout.addWidget(right_panel, stretch=1)
+
+        main_layout.addWidget(self.map_tabs, stretch=1)
         
         self.control_group.setEnabled(False)
 
@@ -349,6 +360,7 @@ class RobotMonitorApp(QMainWindow):
             self.refresh_all()
             self.update_pois()
             self.update_map()
+            self.update_cost_map()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to initialize robot monitor for {robot_sn}: {str(e)}")
 
@@ -365,6 +377,7 @@ class RobotMonitorApp(QMainWindow):
         self.worker.error.connect(self.show_error)
         self.worker.robot_data_updated.connect(self.update_robot_data_ui)
         self.worker.map_updated.connect(self.update_map_ui)
+        self.worker.cost_map_updated.connect(self.update_cost_map_ui)
         self.worker.pois_updated.connect(self.update_poi_combos_ui)
         self.worker.path_planned.connect(self.update_path_ui)
 
@@ -379,7 +392,8 @@ class RobotMonitorApp(QMainWindow):
 
     def update_map(self):
         if self.robot and self.worker:
-            self.worker.update_map(self.temp_map_path)
+            self.worker.update_map()
+            self.worker.update_cost_map()
             
     def update_pois(self):
         if self.robot and self.worker:
@@ -427,6 +441,24 @@ class RobotMonitorApp(QMainWindow):
                 self.task_text.setPlainText("No active task")
                 self.cancel_task_btn.setEnabled(False)
 
+            # Center map on robot
+            if self.robot and pose[0] is not None and self.map_label.pixmap() and not self.map_label.pixmap().isNull():
+                meta = self.robot.get_map_meta()
+                if meta:
+                    img_h = self.map_label.pixmap().height()
+                    px, py = world_to_pixel(
+                        pose[0], pose[1],
+                        origin_x_m=meta['origin_x_m'],
+                        origin_y_m=meta['origin_y_m'],
+                        res_m_per_px=meta['res_m_per_px'],
+                        img_h_px=img_h,
+                        rotation_deg=meta['rotation_deg']
+                    )
+
+                    # Center view on robot
+                    self.map_scroll_area.horizontalScrollBar().setValue(px - self.map_scroll_area.viewport().width() / 2)
+                    self.map_scroll_area.verticalScrollBar().setValue(py - self.map_scroll_area.viewport().height() / 2)
+
         except Exception as e:
             self.show_error(f"Failed to update robot data UI: {e}")
 
@@ -456,9 +488,10 @@ class RobotMonitorApp(QMainWindow):
         except Exception as e:
             self.show_error(f"Failed to load POIs: {e}")
 
-    def update_map_ui(self, map_file):
+    def update_map_ui(self, map_data):
         try:
-            pixmap = QPixmap(map_file)
+            pixmap = QPixmap()
+            pixmap.loadFromData(map_data, "PNG") # Assuming PNG format
             if not pixmap.isNull():
                 scaled = pixmap.scaled(1200, 800, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 self.map_label.setPixmap(scaled)
@@ -468,15 +501,36 @@ class RobotMonitorApp(QMainWindow):
         except Exception as e:
             self.show_error(f"Failed to update map UI: {e}")
             self.map_label.setText(f"Map Error: {e}")
+
+    def update_cost_map_ui(self, map_data):
+        try:
+            pixmap = QPixmap()
+            pixmap.loadFromData(map_data, "PNG")
+            if not pixmap.isNull():
+                scaled = pixmap.scaled(1200, 800, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self.cost_map_label.setPixmap(scaled)
+                self.cost_map_label.adjustSize()
+            else:
+                self.cost_map_label.setText("Failed to load cost map image")
+        except Exception as e:
+            self.show_error(f"Failed to update cost map UI: {e}")
+            self.cost_map_label.setText(f"Cost Map Error: {e}")
             
     def update_path_ui(self, result):
         try:
             length = result.get("length_m", 0)
-            pixmap = QPixmap(str(self.temp_map_path))
-            if not pixmap.isNull():
-                scaled = pixmap.scaled(1200, 800, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                self.map_label.setPixmap(scaled)
-                self.map_label.adjustSize()
+            map_data = result.get("png") # Get image data from 'png' key
+            if map_data:
+                pixmap = QPixmap()
+                pixmap.loadFromData(map_data, "PNG") # Assuming PNG format
+                if not pixmap.isNull():
+                    scaled = pixmap.scaled(1200, 800, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    self.map_label.setPixmap(scaled)
+                    self.map_label.adjustSize()
+                else:
+                    self.map_label.setText("Failed to load path map image")
+            else:
+                self.map_label.setText("No path map data received")
 
             QMessageBox.information(self, "Path Planned",
                                   f"Path planned\nLength: {length:.2f}m")
@@ -554,7 +608,7 @@ class RobotMonitorApp(QMainWindow):
             if poi_name == "Select POI...":
                 QMessageBox.warning(self, "Warning", "Please select a POI")
                 return
-            self.worker.plan_path(poi_name, self.temp_map_path)
+            self.worker.plan_path(poi_name)
 
     def cancel_current_task(self):
         if self.robot:

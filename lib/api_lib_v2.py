@@ -1,4 +1,3 @@
-
 """
 ##########################################################################################
   Imports
@@ -20,6 +19,7 @@ import requests
 try:
     import pandas as pd
     import numpy as np
+    import cv2
 except ImportError:
     pd = None  # Only used if caller asks for DataFrame
     np = None
@@ -46,7 +46,7 @@ log = logging.getLogger(__name__)
 ##########################################################################################
 """
 
-##### api reöated
+##### api reÃ¶ated
 
 ## Ruwen's tokens:
 from dotenv import load_dotenv
@@ -675,7 +675,8 @@ class Robot():
 #             print(f"GPIO {pin}: {'HIGH' if state else 'LOW'}")
 #         time.sleep(0.5)  # Delay between readings
 # except KeyboardInterrupt:
-#     print("\nExiting...")
+#     print("
+#Exiting...")
 # finally:
 #     GPIO.cleanup()
 
@@ -1107,13 +1108,13 @@ def render_full_map(robot_sn: str, out_png="map_with_layers.png"):
         pois_df = None
     scale = _feats_scale_from_pois(feats, pois_df)
     if scale:
-        log.info(f"Applying feature scale factor ≈ {scale:.3f}")
+        log.info(f"Applying feature scale factor Ã¢â€°Ë† {scale:.3f}")
         _scale_feats_inplace(feats, scale)
     else:
-        # fallback heuristic (what you had): km → m if everything is tiny
+        # fallback heuristic (what you had): km Ã¢â€ ’ m if everything is tiny
         flat = [abs(v) for f in feats for (x, y) in f["coords"] for v in (x, y)]
         if flat and max(flat) < 0.02:
-            log.info("Applying fallback ×1000 (kilometers → meters)")
+            log.info("Applying fallback Ãƒâ€”1000 (kilometers Ã¢â€ ’ meters)")
             _scale_feats_inplace(feats, 1000.0)
 
     img = draw_overlays_geojson(base, meta=meta, feats=feats)
@@ -1123,7 +1124,24 @@ def render_full_map(robot_sn: str, out_png="map_with_layers.png"):
 
     # img.save(out_png)
     log.info(f"Wrote: {out_png} (features={len(feats)})")
-    return out_png
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+def render_cost_map(costmap_array):
+    """
+    Renders a costmap numpy array as a PNG image.
+    """
+    if costmap_array is None or costmap_array.size == 0:
+        return None
+
+    # Normalize costmap to 0-255 for visualization
+    costmap_normalized = (costmap_array * 255).astype(np.uint8)
+    img = Image.fromarray(costmap_normalized, 'L')
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 def pixel_to_world(px, py_screen, *, origin_x_m, origin_y_m, res_m_per_px, img_h_px, rotation_deg=0.0):
     """
@@ -1234,12 +1252,12 @@ def follow_robot(robot_sn: str, out_png="map_live.png", interval=5, duration=Non
         pois_df = None
     scale = _feats_scale_from_pois(feats, pois_df)
     if scale:
-        log.info(f"Applying feature scale factor ≈ {scale:.3f}")
+        log.info(f"Applying feature scale factor Ã¢â€°Ë† {scale:.3f}")
         _scale_feats_inplace(feats, scale)
     else:
         flat = [abs(v) for f in feats for (x, y) in f["coords"] for v in (x, y)]
         if flat and max(flat) < 0.02:
-            log.info("Applying fallback ×1000 (kilometers → meters)")
+            log.info("Applying fallback Ãƒâ€”1000 (kilometers Ã¢â€ ’ meters)")
             _scale_feats_inplace(feats, 1000.0)
 
     static_img = draw_overlays_geojson(base, meta=meta, feats=feats)
@@ -1273,7 +1291,7 @@ TYPE_LABELS = {
 }
 
 def yaw_deg_norm(y):
-    # str → float, wrap to [0, 360)
+    # str Ã¢â€ ’ float, wrap to [0, 360)
     y = float(y)
     y = y % 360.0
     return y if y >= 0 else y + 360.0
@@ -1290,7 +1308,7 @@ def compute_and_cache_scale(area_id, feats, pois_df):
     s = _feats_scale_from_pois(feats, pois_df)
     if not s:
         flat = [abs(v) for f in feats for (x, y) in f["coords"] for v in (x, y)]
-        if flat and max(flat) < 0.02:  # km → m heuristic
+        if flat and max(flat) < 0.02:  # km Ã¢â€ ’ m heuristic
             s = 1000.0
     _scale_cache[area_id] = s or 1.0
     return _scale_cache[area_id]
@@ -1414,21 +1432,21 @@ def link_shelves_docks_areas(pois_df: pd.DataFrame, areas_df: pd.DataFrame):
     shelves = pois_df[pois_df["type"]=="shelf"].copy()
     docks   = pois_df[pois_df["type"]=="docking_point"].copy()
 
-    # shelves → area
+    # shelves Ã¢â€ ’ area
     shelves = shelves.merge(
         areas_df[["id","name","regionType","desc"]].rename(columns={"id":"relatedShelvesAreaId","name":"area_name"}),
         on="relatedShelvesAreaId",
         how="left"
     )
 
-    # dock ↔ shelf
+    # dock Ã¢â€ ” shelf
     pair1 = docks.merge(
         shelves[["id","name","dockingPointId"]].rename(columns={"id":"shelf_id","name":"shelf_name"}),
         on="dockingPointId",
         how="left"
     )
 
-    # shelf → dock via shelvePointId (reverse link)
+    # shelf Ã¢â€ ’ dock via shelvePointId (reverse link)
     pair2 = shelves.merge(
         docks[["id","name","shelvePointId"]].rename(columns={"id":"dock_id","name":"dock_name"}),
         left_on="id",
@@ -1512,11 +1530,11 @@ class Robot_v0():
     def get_poi_details(self, poi_name):
         return get_poi_details(self.df, poi_name)
 
-    def get_poi_pose(self, poi_name):
-        return (*get_poi_coordinates(self.df, poi_name), self.get_poi_details(poi_name)['yaw'])
-
     def get_areas(self):
         return get_areas(self.df)
+
+    def get_map_meta(self):
+        return normalize_map_meta(get_map_meta(self.df.areaId, self.SN))[0]
 
 ##### require refresh
     def get_status(self):
@@ -1666,7 +1684,7 @@ class Robot_v0():
             feat_raw = get_map_features(area_id=area_id, robot_sn=self.SN)
             feats = normalize_features_geojson(feat_raw)  # [{'kind','coords','name','props'}, ...]
 
-            # scale (POI-anchored; fallback ×1000 if tiny)
+            # scale (POI-anchored; fallback Ãƒâ€”1000 if tiny)
             try:
                 pois_df = self.get_pois()
             except Exception:
@@ -1933,9 +1951,61 @@ class Robot_v1(Robot_v0):
             base["isAt"]   = pd.DataFrame()
         return base
 
+    def get_env(self, resolution_m=0.1):
+        """
+        Generates a costmap of the environment.
+        - Blocked areas are high cost.
+        - Virtual walls are high cost.
+        Returns a numpy array.
+        """
+        ctx = self._refresh_context()
+        areas = ctx["areas_rich"]
+        lines = ctx["lines"]
+
+        if areas.empty and lines.empty:
+            return np.zeros((10, 10), dtype=np.float32)
+
+        # Get map boundaries
+        min_x = min(areas["bbox_minx"].min(), lines["polyline"].apply(lambda p: min(c[0] for c in p)).min())
+        max_x = max(areas["bbox_maxx"].max(), lines["polyline"].apply(lambda p: max(c[0] for c in p)).max())
+        min_y = min(areas["bbox_miny"].min(), lines["polyline"].apply(lambda p: min(c[1] for c in p)).min())
+        max_y = max(areas["bbox_maxy"].max(), lines["polyline"].apply(lambda p: max(c[1] for c in p)).max())
+
+        width_m = max_x - min_x
+        height_m = max_y - min_y
+
+        width_px = int(width_m / resolution_m)
+        height_px = int(height_m / resolution_m)
+
+        costmap = np.zeros((height_px, width_px), dtype=np.float32)
+
+        # "Paint" blocked areas
+        blocked_areas = areas[areas["blocked"] == True]
+        for _, area in blocked_areas.iterrows():
+            poly = np.array(area["polygon"])
+            poly -= [min_x, min_y]
+            poly /= resolution_m
+            poly = poly.astype(int)
+            cv2.fillPoly(costmap, [poly], 1.0)
+
+        # "Paint" virtual walls
+        for _, line in lines.iterrows():
+            pts = np.array(line["polyline"])
+            pts -= [min_x, min_y]
+            pts /= resolution_m
+            pts = pts.astype(int)
+            cv2.polylines(costmap, [pts], isClosed=False, color=1.0, thickness=2)
+
+        return costmap
+
+class Robot_v2(Robot_v1):
+    pass
 
 
-# ---- human-readable → int maps ----
+
+Robot = Robot_v2
+
+# ---- human-readable Ã¢â€ ’ int maps ----
 TASK_TYPE = {
     "disinfection": 0, "return_to_dock": 1, "restaurant": 2, "hotel": 3,
     "delivery": 4, "factory": 5, "chassis_miniapp": 6, "charge_sched": 7,
@@ -2030,7 +2100,7 @@ class Task:
     def _append_stepact_to_last_or_cur(self, act: dict):
             """Attach a stepAct to the last point; if no points exist, create a point at the robot pose."""
             if not self._taskPts:
-                # no points yet → create one at the robot pose and attach
+                # no points yet Ã¢â€ ’ create one at the robot pose and attach
                 x, y, yaw = self.robot.get_pose()
                 pt = Task._mk_point(x=x, y=y, yaw=yaw, ext={"name": "__cur__", "id": "__robot__"},
                                     areaId=self.robot.df.areaId, stepActs=[act])
@@ -2046,7 +2116,7 @@ class Task:
         audioId: str | None = None,
         url: str | None = None,
         volume: int | None = None,        # [0,100]
-        interval: int | None = None,      # seconds; -1 → once
+        interval: int | None = None,      # seconds; -1 Ã¢â€ ’ once
         num: int | None = None,           # total plays
         duration: int | None = None       # total seconds
     ):
@@ -2373,7 +2443,7 @@ class Task:
 
 # In [96]:
 
-# --- cost → colored background (low=black, high=red) ---
+# --- cost Ã¢â€ ’ colored background (low=black, high=red) ---
 def cost_to_rgba(cost: np.ndarray) -> Image.Image:
     """
     cost: float32 [0..1], HxW
@@ -2434,14 +2504,14 @@ class Robot_v2(Robot_v1):
     def get_env(
         self,
         *,
-        dark_thresh: int = 80,          # base-map grayscale threshold (0..255): lower = darker → obstacle
+        dark_thresh: int = 80,          # base-map grayscale threshold (0..255): lower = darker Ã¢â€ ’ obstacle
         robot_radius_m: float = 0.25,   # inflate obstacles by this radius (meters)
         line_width_m: float = 0.10,     # thickness to rasterize lineType==2 walls (meters)
         base_weight: float = 0.4,       # weight for dark pixels
         area_weight: float = 1.0,       # weight for forbidden areas
         line_weight: float = 1.0,       # weight for virtual walls
         blur_px: int = 0,               # optional final smoothing (pixels)
-        return_uint8: bool = False      # if True → uint8 [0..255]; else float32 [0..1]
+        return_uint8: bool = False      # if True Ã¢â€ ’ uint8 [0..255]; else float32 [0..1]
     ) -> np.ndarray:
         """
         Build a cost map from base map darkness + forbidden areas (regionType==1) + virtual walls (lineType==2).
@@ -2513,7 +2583,7 @@ class Robot_v2(Robot_v1):
             wall_lines = walls["polyline"].tolist()
         wall_mask = rasterize_lines(wall_lines, width_m=line_width_m)
 
-        # --- combine weighted → cost in [0,1]
+        # --- combine weighted Ã¢â€ ’ cost in [0,1]
         # normalize masks to 0..1 then weighted sum, clamp
         base_f = (base_mask.astype(np.float32) / 255.0) * base_weight
         forb_f = (forb_mask.astype(np.float32) / 255.0) * area_weight
@@ -2705,7 +2775,7 @@ class Robot_v2(Robot_v1):
         cost = self.get_env(return_uint8=False)  # float32 [0..1], HxW
         H, W = cost.shape
 
-        # Make the image we’ll draw on
+        # Make the image weÃ¢â‚¬â„¢ll draw on
         img = cost_to_rgba(cost)
         dr  = ImageDraw.Draw(img, "RGBA")
 
@@ -2721,7 +2791,7 @@ class Robot_v2(Robot_v1):
             raise RuntimeError(f"POI '{poi_name}' not found")
         gx, gy = float(target.iloc[0]["coordinate"][0]), float(target.iloc[0]["coordinate"][1])
 
-        # --- World→Pixel using COST height (H) as the screen height
+        # --- WorldÃ¢â€ ’Pixel using COST height (H) as the screen height
         s_px = world_to_pixel(sx, sy, origin_x_m=ox, origin_y_m=oy, res_m_per_px=res, img_h_px=H, rotation_deg=rot)
         g_px = world_to_pixel(gx, gy, origin_x_m=ox, origin_y_m=oy, res_m_per_px=res, img_h_px=H, rotation_deg=rot)
 
@@ -2790,8 +2860,10 @@ class Robot_v2(Robot_v1):
         length_m  = _polyline_length(path_world) if path_world else 0.0
         length_px = _polyline_length(path_px)    if path_rc    else 0.0  # if you want pixels too
 
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG")
         return {
-            "png": out_png,
+            "png": buffer.getvalue(),
             "pixels": (path_px if path_rc else []),
             "world": path_world,
             "length_m": length_m,    # total path length in meters
