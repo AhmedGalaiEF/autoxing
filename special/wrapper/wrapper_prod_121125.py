@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*- 
 
 import os, re, time, threading
 from datetime import datetime
@@ -255,10 +255,8 @@ def _highest_numbered_name(df: pd.DataFrame, rx: re.Pattern) -> Optional[str]:
     if cand.empty:
         return None
     def tail_num(s: str) -> int:
-        try:
-            return int(s.split()[-1])
-        except Exception:
-            return -1
+        try: return int(s.split()[-1])
+        except Exception: return -1
     best = max(cand, key=lambda s: tail_num(str(s)))
     return str(best)
 
@@ -320,10 +318,13 @@ def _take_reset_rows() -> set:
     return to_reset
 
 # ===== Dwell utilities =====
-def dwell_until(robot: Robot, target: Dict[str, Any], radius_m: float, dwell_s: float) -> bool:
+def dwell_until(robot: Robot, target: Dict[str, Any], radius_m: float, dwell_s: float, stop_event: Optional[threading.Event] = None) -> bool:
     start = None
     deadline = time.monotonic() + 3600
     while time.monotonic() < deadline:
+        if stop_event and stop_event.is_set():
+            _log("[Dwell] stopped.")
+            return False
         try:
             curr = robot.get_curr_pos()
         except Exception:
@@ -348,8 +349,11 @@ def dwell_until(robot: Robot, target: Dict[str, Any], radius_m: float, dwell_s: 
     _log("[Dwell] timeout.")
     return False
 
-def depart_then_dwell(robot: Robot, target: Dict[str, Any], radius_m: float, dwell_s: float) -> bool:
+def depart_then_dwell(robot: Robot, target: Dict[str, Any], radius_m: float, dwell_s: float, stop_event: Optional[threading.Event] = None) -> bool:
     while True:
+        if stop_event and stop_event.is_set():
+            _log("[Dwell] stopped during depart.")
+            return False
         try:
             curr = robot.get_curr_pos()
         except Exception:
@@ -357,7 +361,7 @@ def depart_then_dwell(robot: Robot, target: Dict[str, Any], radius_m: float, dwe
         if _distance(curr, target) > radius_m:
             break
         time.sleep(POLL_SEC)
-    return dwell_until(robot, target, radius_m, dwell_s)
+    return dwell_until(robot, target, radius_m, dwell_s, stop_event)
 
 # ===== FSM Runner =====
 from enum import Enum, auto
@@ -477,7 +481,7 @@ class FSMRunner(threading.Thread):
 
     def _cleanup(self):
         if callable(self._on_exit):
-            try: self._on_exit()
+            try: self._on_exit() # type: ignore
             except Exception: pass
 
     def run(self):
@@ -501,7 +505,7 @@ class FSMRunner(threading.Thread):
                     # IMPORTANT: don't deadlock. For row>0, just confirm we're AT waiting.
                     if self.row_idx > 0:
                         _log(f"[FSM] Row {self.row_idx+1} GATE: dwell {ROW_GATE_DWELL_SEC:.0f}s at '{self.waiting['name']}'")
-                        if not dwell_until(rob, self.waiting, ARRIVE_DIST_M, ROW_GATE_DWELL_SEC):
+                        if not dwell_until(rob, self.waiting, ARRIVE_DIST_M, ROW_GATE_DWELL_SEC, self._stop):
                             _log("[FSM] gate dwell failed → ABORTED"); self.state = FSMState.ABORTED; continue
                     self.state = FSMState.SUBMIT_A
 
@@ -533,9 +537,8 @@ class FSMRunner(threading.Thread):
                             temprob = Robot_v2(rob.SN)
                             task = Task(temprob, "area", taskType="factory",runType="lift").pickup(ptts[0]['ext']['name'], lift_up=True, areaDelivery=False).pickup(ptts[1]['ext']['name'], lift_down=True, areaDelivery=True).back("Warten")
                             resp = create_task(**task.task_dict)
-                            print(task.task_dict)
                             _log(f"[FSM] Row {self.row_idx+1}: confirmation dwell {ROW_GATE_DWELL_SEC:.0f}s at waiting")
-                            if not depart_then_dwell(rob, self.waiting, ARRIVE_DIST_M, ROW_GATE_DWELL_SEC):
+                            if not depart_then_dwell(rob, self.waiting, ARRIVE_DIST_M, ROW_GATE_DWELL_SEC, self._stop):
                                 _log("[FSM] confirmation dwell failed → ABORTED"); self.state = FSMState.ABORTED; continue
                             self.state = FSMState.ROW_DONE
                     except Exception as e:
@@ -563,7 +566,7 @@ class FSMRunner(threading.Thread):
                         continue
 
                     _log(f"[FSM] Pre-pulse dwell {PRE_PULSE_DWELL_S:.0f}s at waiting (gate passed)")
-                    if dwell_until(rob, self.waiting, ARRIVE_DIST_M, PRE_PULSE_DWELL_S):
+                    if dwell_until(rob, self.waiting, ARRIVE_DIST_M, PRE_PULSE_DWELL_S, self._stop):
                         self.state = FSMState.PULSE
                     else:
                         _log("[FSM] pre-pulse dwell failed → ABORTED")
@@ -575,7 +578,7 @@ class FSMRunner(threading.Thread):
 
                 elif self.state == FSMState.POST_PULSE_WAIT:
                     _log(f"[FSM] Post-pulse dwell {POST_PULSE_DWELL_S:.0f}s at waiting")
-                    if dwell_until(rob, self.waiting, ARRIVE_DIST_M, POST_PULSE_DWELL_S):
+                    if dwell_until(rob, self.waiting, ARRIVE_DIST_M, POST_PULSE_DWELL_S, self._stop):
                         self.state = FSMState.SUBMIT_B
                     else:
                         _log("[FSM] post-pulse dwell failed → ABORTED"); self.state = FSMState.ABORTED
@@ -594,7 +597,7 @@ class FSMRunner(threading.Thread):
                         print(task.task_dict)
                         resp = create_task(**task.task_dict)
                         _log(f"[FSM] Row {self.row_idx+1}: confirmation dwell {ROW_GATE_DWELL_SEC:.0f}s at waiting")
-                        if not depart_then_dwell(rob, self.waiting, ARRIVE_DIST_M, ROW_GATE_DWELL_SEC):
+                        if not depart_then_dwell(rob, self.waiting, ARRIVE_DIST_M, ROW_GATE_DWELL_SEC, self._stop):
                             _log("[FSM] B completion dwell failed → ABORTED"); self.state = FSMState.ABORTED; continue
                         self.state = FSMState.ROW_DONE
                     except Exception as e:
@@ -692,7 +695,7 @@ def row_ui(i: int) -> dbc.Card:
 app.layout = dbc.Container([
     dbc.Card(dbc.CardBody([
         dbc.Row([
-           dbc.Col(html.Div("Robot ID:"), width="auto"),
+           dbc.Col(html.Div("Robot ID:")), width="auto"),
            dbc.Col(dbc.Input(id="robot-id", value=DEFAULT_ROBOT_ID, placeholder="robotId", n_submit=0, type="text", disabled=True),
                    width=4),
            dbc.Col(dbc.Button("Load robot", id="btn-load", color="secondary", disabled=True), width="auto"),
@@ -744,7 +747,6 @@ def _runner_clear_global():
 #        set_robot(rid)  # single instance swap here
 #        picks = _all_poi_names()
 #        picks = _pickups(rid)
-#        drops = picks
 #        drops = _drops(rid)
 #        wait  = _find_waiting()
 #    except Exception as e:
@@ -847,7 +849,7 @@ def handle_actions(n_start, n_back, rstate, *state):
         # stop FSM thread if any
         with RUNNER_LOCK:
             if RUNNER and hasattr(RUNNER, "stop"):
-                try: RUNNER.stop()
+                try: RUNNER.stop() # type: ignore
                 except Exception: pass
 
         # actively send the robot to Standby with a tiny task
@@ -860,7 +862,7 @@ def handle_actions(n_start, n_back, rstate, *state):
                     pt(wait, acts=[act_pause(1)]),  # tiny pause to be visible in logs
                 ]
                 create_task(
-                    task_name=name, robot=get_robot().df,
+                    task_name=name, robot=get_robot().df, 
                     runType=RUN_TYPE_LIFT, sourceType=SOURCE_SDK,
                     taskPts=body, runNum=1, taskType=TASK_TYPE_LIFT,
                     routeMode=ROUTE_SEQ, runMode=RUNMODE_FLEX, speed=1.0,
