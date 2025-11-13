@@ -606,14 +606,80 @@ app.index_string = """
   {%favicon%}
   {%css%}
   <style>
-    body { background:#0e1218; color:#f8f9fb; }
-    .card, .alert, .btn, .form-control { border-radius: 8px; }
-    .Select, .Select-control, .Select-menu-outer { background:#0f1724; color:#e9eef7; border-color:#2b3750; }
-    .Select-option.is-focused, .Select-option:hover { background:#1b2842; color:#ffffff; }
-    .dash-dropdown>div>div { border-color:#2b3750 !important; }
-    .btn-primary { background:#3b82f6; border-color:#3b82f6; }
-    .btn-primary:hover { background:#2563eb; border-color:#2563eb; }
-    pre { background:#0f1724; color:#dbe7ff; padding:12px; border-radius:8px; border:1px solid #2b3750; }
+    body {
+      background: #0e1218;
+      color: #f8f9fb;
+    }
+
+    .card, .alert, .btn, .form-control {
+      border-radius: 8px;
+    }
+
+    /* Dropdown base (dcc.Dropdown -> react-select v1) */
+    .dash-dropdown,
+    .dash-dropdown .Select,
+    .dash-dropdown .Select-control,
+    .dash-dropdown .Select-menu-outer {
+      background: #0f1724;
+      color: #e9eef7;
+      border-color: #2b3750;
+    }
+
+    .dash-dropdown .Select-option.is-focused,
+    .dash-dropdown .Select-option:hover {
+      background: #1b2842;
+      color: #ffffff;
+    }
+
+    .dash-dropdown > div > div {
+      border-color: #2b3750 !important;
+    }
+
+    /* Keep selected value text bright (fix for darker text issue) */
+    .dash-dropdown .Select.has-value.Select--single > .Select-control .Select-value .Select-value-label {
+      color: #e9eef7 !important;
+    }
+
+    /* Keep input text visible while typing */
+    .dash-dropdown .Select-input > input {
+      color: #e9eef7 !important;
+    }
+
+    /* Keep selected option visible in the open menu */
+    .dash-dropdown .Select-option.is-selected {
+      background: #1b2842;
+      color: #ffffff !important;
+    }
+
+    /* Multi-select (if ever used) */
+    .dash-dropdown .Select--multi .Select-value {
+      background: #1b2842;
+      border-color: #2b3750;
+    }
+
+    .dash-dropdown .Select--multi .Select-value-label {
+      color: #e9eef7 !important;
+    }
+
+    /* Buttons */
+    .btn-primary {
+      background: #3b82f6;
+      border-color: #3b82f6;
+    }
+
+    .btn-primary:hover {
+      background: #2563eb;
+      border-color: #2563eb;
+    }
+
+    /* Log window */
+    pre {
+      background: #0f1724;
+      color: #dbe7ff;
+      padding: 12px;
+      border-radius: 8px;
+      border: 1px solid #2b3750;
+    }
   </style>
 </head>
 <body>
