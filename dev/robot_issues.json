@@ -1,0 +1,20 @@
+[
+  {
+    "id": 1,
+    "robot_type": "Forkklift",
+    "robot_manufacturer": "Autoxing",
+    "expected_behaviour": "Drives forwards to goal area, turns around, drives backwards to align with goal shelf",
+    "actual_behaviour": "Drives backwards to goal area",
+    "error_messages": "None",
+    "solutions": "Extend track in map to allow for turning space at goal area"
+  },
+  {
+    "id": 2,
+    "robot_type": "All",
+    "robot_manufacturer": "Autoxing",
+    "expected_behaviour": "Correct Datetime Settings",
+    "actual_behaviour": "Wrong Datetime Settings (Chinese)",
+    "error_messages": "None",
+    "solutions": "Manually set Settings in Android/System, Remove Sim card, set host as NTP server, international, overseas, enable time sync"
+  }
+]
