@@ -1,0 +1,2 @@
+use the available agents, especially the newly created one to create /examples/guide.ipynb which showcases
+  how to use the api effectively
