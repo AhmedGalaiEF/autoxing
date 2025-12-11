@@ -1155,28 +1155,33 @@ def handle_actions(n_start, n_back, rstate, *state):
             if RUNNER and hasattr(RUNNER, "stop"):
                 try:
                     RUNNER.stop()
+                    rob = Robot(rid)
+                    rob.cancel_task()
+                    rob.back()
+                    _log("[UI] Cancel: sent 'go Standby' task.")
                 except Exception:
+                    _log(f"[UI] Cancel: standby task failed: {e}")
                     pass
 
         # actively send the robot to Standby with a tiny task
-        try:
-            if not wait:
-                wait = _find_waiting()
-            if wait:
-                name = f"cancel_to_waiting_{int(time.time())}"
-                body = [
-                    pt(wait, acts=[act_pause(1)]),  # tiny pause to be visible in logs
-                ]
-                create_task(
-                    task_name=name, robot=get_robot().df,
-                    runType=RUN_TYPE_LIFT, sourceType=SOURCE_SDK,
-                    taskPts=body, runNum=1, taskType=TASK_TYPE_LIFT,
-                    routeMode=ROUTE_SEQ, runMode=RUNMODE_FLEX, speed=1.0,
-                    detourRadius=1.0, ignorePublicSite=False, backPt=back_pt(wait)
-                )
-                _log("[UI] Cancel: sent 'go Standby' task.")
-        except Exception as e:
-            _log(f"[UI] Cancel: standby task failed: {e}")
+        # try:
+        #     if not wait:
+        #         wait = _find_waiting()
+        #     if wait:
+        #         name = f"cancel_to_waiting_{int(time.time())}"
+        #         body = [
+        #             pt(wait, acts=[act_pause(1)]),  # tiny pause to be visible in logs
+        #         ]
+        #         create_task(
+        #             task_name=name, robot=get_robot().df,
+        #             runType=RUN_TYPE_LIFT, sourceType=SOURCE_SDK,
+        #             taskPts=body, runNum=1, taskType=TASK_TYPE_LIFT,
+        #             routeMode=ROUTE_SEQ, runMode=RUNMODE_FLEX, speed=1.0,
+        #             detourRadius=1.0, ignorePublicSite=False, backPt=back_pt(wait)
+        #         )
+        #         _log("[UI] Cancel: sent 'go Standby' task.")
+        # except Exception as e:
+        #     _log(f"[UI] Cancel: standby task failed: {e}")
 
         return "Canceled current plan and sent robot to Standby.", True
 
