@@ -1270,7 +1270,7 @@ def handle_actions(n_start, n_back, rstate, *state):
                 resp = rob.cancel_task()
                 print(resp)
                 _log("[UI] Cancel: sent 'go Standby' task.")
-                rob.back()
+                rob.go_back()
         except Exception as e:
             _log(f"[UI] Cancel: standby task failed: {e}")
 
