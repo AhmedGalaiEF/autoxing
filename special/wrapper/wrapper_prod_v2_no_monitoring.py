@@ -432,66 +432,49 @@ def _is_at(robot: Robot, target: Dict[str, Any], radius_m: float) -> bool:
     except Exception:
         return False
 
-def _wait_until_depart(robot: Robot, point: Dict[str, Any], radius_m: float, timeout_s: float, stop_event: Optional[threading.Event] = None) -> bool:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if stop_event and stop_event.is_set():
-            _log("[Gate] cancel during depart wait")
-            return False
-        curr = robot.get_curr_pos()
-        if not _is_at(robot, point, radius_m):
-            _log(f"[Gate] Departed '{point.get('name','?')}'")
-            return True
-        time.sleep(POLL_SEC)
-        _log(f"waiting to depart {point.get('name','?')}")
-        _log(f"distance from {point.get('name','?')}:")
-        _log(_distance(curr, point))
-    _log(f"[Gate] depart timeout from '{point.get('name','?')}'")
-    return False
-
 # def _wait_until_depart(robot: Robot, point: Dict[str, Any], radius_m: float, timeout_s: float, stop_event: Optional[threading.Event] = None) -> bool:
 #     deadline = time.monotonic() + timeout_s
 #     while time.monotonic() < deadline:
 #         if stop_event and stop_event.is_set():
 #             _log("[Gate] cancel during depart wait")
 #             return False
-
-#         try:
-#             curr = robot.get_curr_pos()
-#         except Exception as e:
-#             _log(f"[Gate] get_curr_pos failed during depart: {e!r}")
-#             time.sleep(POLL_SEC)
-#             continue
-
+#         curr = robot.get_curr_pos()
 #         if not _is_at(robot, point, radius_m):
 #             _log(f"[Gate] Departed '{point.get('name','?')}'")
 #             return True
-
 #         time.sleep(POLL_SEC)
 #         _log(f"waiting to depart {point.get('name','?')}")
 #         _log(f"distance from {point.get('name','?')}:")
 #         _log(_distance(curr, point))
-
 #     _log(f"[Gate] depart timeout from '{point.get('name','?')}'")
 #     return False
 
-
-def _wait_until_arrive(robot: Robot, point: Dict[str, Any], radius_m: float, timeout_s: float, stop_event: Optional[threading.Event] = None) -> bool:
+def _wait_until_depart(robot: Robot, point: Dict[str, Any], radius_m: float, timeout_s: float, stop_event: Optional[threading.Event] = None) -> bool:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if stop_event and stop_event.is_set():
-            _log("[Gate] cancel during arrive wait")
+            _log("[Gate] cancel during depart wait")
             return False
-        curr = robot.get_curr_pos()
-        if _is_at(robot, point, radius_m):
-            _log(f"[Gate] Arrived at '{point.get('name','?')}'")
+
+        try:
+            curr = robot.get_curr_pos()
+        except Exception as e:
+            _log(f"[Gate] get_curr_pos failed during depart: {e!r}")
+            time.sleep(POLL_SEC)
+            continue
+
+        if not _is_at(robot, point, radius_m):
+            _log(f"[Gate] Departed '{point.get('name','?')}'")
             return True
+
         time.sleep(POLL_SEC)
-        _log(f"waiting to arrive at {point.get('name','?')}")
+        _log(f"waiting to depart {point.get('name','?')}")
         _log(f"distance from {point.get('name','?')}:")
         _log(_distance(curr, point))
-    _log(f"[Gate] arrive timeout to '{point.get('name','?')}'")
+
+    _log(f"[Gate] depart timeout from '{point.get('name','?')}'")
     return False
+
 
 # def _wait_until_arrive(robot: Robot, point: Dict[str, Any], radius_m: float, timeout_s: float, stop_event: Optional[threading.Event] = None) -> bool:
 #     deadline = time.monotonic() + timeout_s
@@ -499,26 +482,43 @@ def _wait_until_arrive(robot: Robot, point: Dict[str, Any], radius_m: float, tim
 #         if stop_event and stop_event.is_set():
 #             _log("[Gate] cancel during arrive wait")
 #             return False
-
-#         try:
-#             curr = robot.get_curr_pos()
-#         except Exception as e:
-#             _log(f"[Gate] get_curr_pos failed during arrive: {e!r}")
-#             time.sleep(POLL_SEC)
-#             continue
-
-#         # Use the position we already fetched, don't call get_curr_pos again
-#         if _distance(curr, point) <= radius_m:
+#         curr = robot.get_curr_pos()
+#         if _is_at(robot, point, radius_m):
 #             _log(f"[Gate] Arrived at '{point.get('name','?')}'")
 #             return True
-
 #         time.sleep(POLL_SEC)
 #         _log(f"waiting to arrive at {point.get('name','?')}")
 #         _log(f"distance from {point.get('name','?')}:")
 #         _log(_distance(curr, point))
-
 #     _log(f"[Gate] arrive timeout to '{point.get('name','?')}'")
 #     return False
+
+def _wait_until_arrive(robot: Robot, point: Dict[str, Any], radius_m: float, timeout_s: float, stop_event: Optional[threading.Event] = None) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if stop_event and stop_event.is_set():
+            _log("[Gate] cancel during arrive wait")
+            return False
+
+        try:
+            curr = robot.get_curr_pos()
+        except Exception as e:
+            _log(f"[Gate] get_curr_pos failed during arrive: {e!r}")
+            time.sleep(POLL_SEC)
+            continue
+
+        # Use the position we already fetched, don't call get_curr_pos again
+        if _distance(curr, point) <= radius_m:
+            _log(f"[Gate] Arrived at '{point.get('name','?')}'")
+            return True
+
+        time.sleep(POLL_SEC)
+        _log(f"waiting to arrive at {point.get('name','?')}")
+        _log(f"distance from {point.get('name','?')}:")
+        _log(_distance(curr, point))
+
+    _log(f"[Gate] arrive timeout to '{point.get('name','?')}'")
+    return False
 
 
 def wrapper_roundtrip_gate(robot: Robot,
