@@ -234,6 +234,20 @@ def pt(p: Dict[str, Any], acts=None, stopRadius=1.0) -> Dict[str, Any]:
 def back_pt(p: Dict[str, Any]) -> Dict[str, Any]:
     return {"x": p["x"], "y": p["y"], "yaw": p["yaw"], "areaId": p["areaId"], "stopRadius": 1.0, "ext": {"id": p.get("id"), "name": p.get("name")}}
 
+
+def _create_with_retry(body, retries: int = 3, delay: float = 2.0):
+    for attempt in range(1, retries + 1):
+        try:
+            resp = create_task(**body)
+            _log(f"[FSM] submitted task (attempt {attempt}) → {resp}")
+            return resp
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError) as e:
+            _log(f"[FSM] transient HTTP error (attempt {attempt}): {e!r}")
+            if attempt == retries:
+                raise
+            time.sleep(delay)
+
 # ---- Region targeting (drop-down) ----
 REGION_OPTIONS = ["Euroboxen", "Sichtlager", "Divers-Links", "Divers-Rechts"]
 
@@ -623,7 +637,8 @@ class FSMRunner(threading.Thread):
                             ]
                             task = Task(temprob, "area", taskType="factory",runType="lift").pickup(ptts[0]['ext']['name'], lift_up=True).pickup(ptts[1]['ext']['name'], lift_down=True).back("Warten")
                             print(task.task_dict)
-                            resp = create_task(**task.task_dict)
+                            # resp = create_task(**task.task_dict)
+                            resp = _create_with_retry(**task.task_dict)
                             self.state = FSMState.PREPARE_PULSE
                         else:
                             name = f"r{self.row_idx+1}_{int(time.time())}"
@@ -634,13 +649,21 @@ class FSMRunner(threading.Thread):
                             from api_lib_v1 import Robot_v2, Task
                             temprob = Robot_v2(rob.SN)
                             task = Task(temprob, "area", taskType="factory",runType="lift").pickup(ptts[0]['ext']['name'], lift_up=True, areaDelivery=False).pickup(ptts[1]['ext']['name'], lift_down=True, areaDelivery=True).back("Warten")
-                            resp = create_task(**task.task_dict)
+                            # resp = create_task(**task.task_dict)
+                            resp = _create_with_retry(**task.task_dict)
                             _log(f"[FSM] Row {self.row_idx+1}: confirmation dwell {ROW_GATE_DWELL_SEC:.0f}s at waiting")
                             if not depart_then_dwell(rob, self.waiting, ARRIVE_DIST_M, ROW_GATE_DWELL_SEC, self._stop):
                                 _log("[FSM] confirmation dwell failed → ABORTED"); self.state = FSMState.ABORTED; continue
                             self.state = FSMState.ROW_DONE
+                    # except Exception as e:
+                    #     _log(f"[FSM] SUBMIT_A failed: {e}"); self.state = FSMState.ABORTED
+                    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                        _log(f"[FSM] SUBMIT_A: HTTP error after retries → ABORTED: {e!r}")
+                        self.state = FSMState.ABORTED
                     except Exception as e:
-                        _log(f"[FSM] SUBMIT_A failed: {e}"); self.state = FSMState.ABORTED
+                        _log(f"[FSM] SUBMIT_A: unexpected error → ABORTED: {e!r}")
+                        self.state = FSMState.ABORTED
+
 
                 elif self.state == FSMState.PREPARE_PULSE:
                     row = self.rows[self.row_idx]
@@ -686,13 +709,20 @@ class FSMRunner(threading.Thread):
                         temprob = Robot_v2(rob.SN)
                         task = Task(temprob, "area", taskType="factory",runType="lift").pickup(ptts[0]['ext']['name'], lift_up=True, areaDelivery=True).pickup(ptts[1]['ext']['name'], lift_down=True, areaDelivery=True).back("Warten")
                         print(task.task_dict)
-                        resp = create_task(**task.task_dict)
+                        # resp = create_task(**task.task_dict)
+                        resp = _create_with_retry(**task.task_dict)
                         _log(f"[FSM] Row {self.row_idx+1}: confirmation dwell {ROW_GATE_DWELL_SEC:.0f}s at waiting")
                         if not depart_then_dwell(rob, self.waiting, ARRIVE_DIST_M, ROW_GATE_DWELL_SEC, self._stop):
                             _log("[FSM] B completion dwell failed → ABORTED"); self.state = FSMState.ABORTED; continue
                         self.state = FSMState.ROW_DONE
+                    # except Exception as e:
+                    #     _log(f"[FSM] SUBMIT_B failed: {e}"); self.state = FSMState.ABORTED
+                    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                        _log(f"[FSM] SUBMIT_B: HTTP error after retries → ABORTED: {e!r}")
+                        self.state = FSMState.ABORTED
                     except Exception as e:
-                        _log(f"[FSM] SUBMIT_B failed: {e}"); self.state = FSMState.ABORTED
+                        _log(f"[FSM] SUBMIT_B: unexpected error → ABORTED: {e!r}")
+                        self.state = FSMState.ABORTED
 
                 elif self.state == FSMState.ROW_DONE:
                     _log(f"[FSM] Row {self.row_idx+1} done → request UI reset")
@@ -1237,7 +1267,8 @@ def handle_actions(n_start, n_back, rstate, *state):
                 # _log("[UI] canceling current task...")
                 from api_lib_v1 import Robot_v2
                 rob = Robot_v2(rid)
-                rob.cancel_task()
+                resp = rob.cancel_task()
+                print(resp)
                 _log("[UI] Cancel: sent 'go Standby' task.")
                 rob.back()
         except Exception as e:
