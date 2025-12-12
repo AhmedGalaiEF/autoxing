@@ -22,7 +22,7 @@ if not getattr(_requests.sessions.Session.request, "_wrapped_with_timeout", Fals
 
 # ===== SDK =====
 from api_lib import Robot, create_task
-testvar=4
+
 # ===== App / Robot config =====
 DEFAULT_ROBOT_ID = "FS52505505633sR"
 WAITING_POI_NAME = "Warten"
@@ -494,31 +494,31 @@ def _wait_until_depart(robot: Robot, point: Dict[str, Any], radius_m: float, tim
 #     return False
 
 def _wait_until_arrive(robot: Robot, point: Dict[str, Any], radius_m: float, timeout_s: float, stop_event: Optional[threading.Event] = None) -> bool:
-deadline = time.monotonic() + timeout_s
-while time.monotonic() < deadline:
-    if stop_event and stop_event.is_set():
-        _log("[Gate] cancel during arrive wait")
-        return False
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if stop_event and stop_event.is_set():
+            _log("[Gate] cancel during arrive wait")
+            return False
 
-    try:
-        curr = robot.get_curr_pos()
-    except Exception as e:
-        _log(f"[Gate] get_curr_pos failed during arrive: {e!r}")
+        try:
+            curr = robot.get_curr_pos()
+        except Exception as e:
+            _log(f"[Gate] get_curr_pos failed during arrive: {e!r}")
+            time.sleep(POLL_SEC)
+            continue
+
+        # Use the position we already fetched, don't call get_curr_pos again
+        if _distance(curr, point) <= radius_m:
+            _log(f"[Gate] Arrived at '{point.get('name','?')}'")
+            return True
+
         time.sleep(POLL_SEC)
-        continue
+        _log(f"waiting to arrive at {point.get('name','?')}")
+        _log(f"distance from {point.get('name','?')}:")
+        _log(_distance(curr, point))
 
-    # Use the position we already fetched, don't call get_curr_pos again
-    if _distance(curr, point) <= radius_m:
-        _log(f"[Gate] Arrived at '{point.get('name','?')}'")
-        return True
-
-    time.sleep(POLL_SEC)
-    _log(f"waiting to arrive at {point.get('name','?')}")
-    _log(f"distance from {point.get('name','?')}:")
-    _log(_distance(curr, point))
-
-_log(f"[Gate] arrive timeout to '{point.get('name','?')}'")
-return False
+    _log(f"[Gate] arrive timeout to '{point.get('name','?')}'")
+    return False
 
 
 def wrapper_roundtrip_gate(robot: Robot,
