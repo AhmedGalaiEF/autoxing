@@ -638,7 +638,7 @@ class FSMRunner(threading.Thread):
                             task = Task(temprob, "area", taskType="factory",runType="lift").pickup(ptts[0]['ext']['name'], lift_up=True).pickup(ptts[1]['ext']['name'], lift_down=True).back("Warten")
                             print(task.task_dict)
                             # resp = create_task(**task.task_dict)
-                            resp = _create_with_retry(**task.task_dict)
+                            resp = _create_with_retry(task.task_dict)
                             self.state = FSMState.PREPARE_PULSE
                         else:
                             name = f"r{self.row_idx+1}_{int(time.time())}"
@@ -650,7 +650,7 @@ class FSMRunner(threading.Thread):
                             temprob = Robot_v2(rob.SN)
                             task = Task(temprob, "area", taskType="factory",runType="lift").pickup(ptts[0]['ext']['name'], lift_up=True, areaDelivery=False).pickup(ptts[1]['ext']['name'], lift_down=True, areaDelivery=True).back("Warten")
                             # resp = create_task(**task.task_dict)
-                            resp = _create_with_retry(**task.task_dict)
+                            resp = _create_with_retry(task.task_dict)
                             _log(f"[FSM] Row {self.row_idx+1}: confirmation dwell {ROW_GATE_DWELL_SEC:.0f}s at waiting")
                             if not depart_then_dwell(rob, self.waiting, ARRIVE_DIST_M, ROW_GATE_DWELL_SEC, self._stop):
                                 _log("[FSM] confirmation dwell failed → ABORTED"); self.state = FSMState.ABORTED; continue
@@ -710,7 +710,7 @@ class FSMRunner(threading.Thread):
                         task = Task(temprob, "area", taskType="factory",runType="lift").pickup(ptts[0]['ext']['name'], lift_up=True, areaDelivery=True).pickup(ptts[1]['ext']['name'], lift_down=True, areaDelivery=True).back("Warten")
                         print(task.task_dict)
                         # resp = create_task(**task.task_dict)
-                        resp = _create_with_retry(**task.task_dict)
+                        resp = _create_with_retry(task.task_dict)
                         _log(f"[FSM] Row {self.row_idx+1}: confirmation dwell {ROW_GATE_DWELL_SEC:.0f}s at waiting")
                         if not depart_then_dwell(rob, self.waiting, ARRIVE_DIST_M, ROW_GATE_DWELL_SEC, self._stop):
                             _log("[FSM] B completion dwell failed → ABORTED"); self.state = FSMState.ABORTED; continue
